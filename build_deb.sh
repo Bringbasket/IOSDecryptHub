@@ -5,6 +5,12 @@
 #   vendor/dylib/rootless/decrypt_helper.dylib   (arm64)
 #   vendor/dylib/roothide/decrypt_helper.dylib   (arm64 + arm64e)
 #
+# 包内组件:
+#   IOSDecryptHubLoader.dylib  ElleKit 注入加载器（读名单 → dlopen 引擎，无 hook）
+#   decrypt_helper.dylib       闭源引擎（vendor 成品）
+#   IOSDecryptHubManager.app   管理器 App（开关 / 状态 / 更新入口）
+#   IOSDecryptHubUpdated       updater daemon，一次性进程（检查/安装/回滚），见 AGENTS.md
+#
 # 用法:
 #   ./build_deb.sh              # 构建全部目标
 #   ./build_deb.sh rootless     # 仅普通 rootless
@@ -55,6 +61,13 @@ LOADER_SRC="$SCRIPT_DIR/src/loader.m"
 PREFS_SRC="$SCRIPT_DIR/prefs/IOSDecryptHubPrefsListController.m"
 PREFS_ICON="$SCRIPT_DIR/prefs/icon.png"
 WECHAT_PNG="$SCRIPT_DIR/prefs/wechat-follow.png"
+APP_SRCS="$SCRIPT_DIR/app/DHManagerAppDelegate.m $SCRIPT_DIR/app/DHRootViewController.m $SCRIPT_DIR/app/DHConfigStore.m $SCRIPT_DIR/app/DHAppEnumerator.m"
+APP_INFO="$SCRIPT_DIR/app/Info.plist"
+APP_ENTITLEMENTS="$SCRIPT_DIR/app/entitlements.plist"
+DAEMON_SRC="$SCRIPT_DIR/daemon/main.m"
+DAEMON_PLIST_TMPL="$SCRIPT_DIR/daemon/com.iosdecrypthub.updated.plist"
+APP_NAME="IOSDecryptHubManager"
+DAEMON_BIN="IOSDecryptHubUpdated"
 
 compile_loader() {
     local ARCHS="$1"
@@ -97,6 +110,41 @@ compile_prefs() {
     cp "$WECHAT_PNG" "$BUNDLE_DIR/wechat-follow.png"
 }
 
+compile_app() {
+    local ARCHS="$1"
+    local OUT="$2"
+    local ARCH_FLAGS=()
+    local ARCH
+    for ARCH in $ARCHS; do
+        ARCH_FLAGS+=( -arch "$ARCH" )
+    done
+    info "编译管理器 App (archs=$ARCHS)..."
+    mkdir -p "$(dirname "$OUT")"
+    # shellcheck disable=SC2086
+    $CC "${ARCH_FLAGS[@]}" -isysroot "$SDK" -miphoneos-version-min=14.0 \
+        -ObjC -fobjc-arc -Wall -O2 \
+        -Isrc \
+        -framework Foundation -framework UIKit \
+        $APP_SRCS -o "$OUT"
+}
+
+compile_daemon() {
+    local ARCHS="$1"
+    local OUT="$2"
+    local ARCH_FLAGS=()
+    local ARCH
+    for ARCH in $ARCHS; do
+        ARCH_FLAGS+=( -arch "$ARCH" )
+    done
+    info "编译 updater daemon (archs=$ARCHS)..."
+    mkdir -p "$(dirname "$OUT")"
+    $CC "${ARCH_FLAGS[@]}" -isysroot "$SDK" -miphoneos-version-min=14.0 \
+        -ObjC -fobjc-arc -Wall -O2 \
+        -Isrc \
+        -framework Foundation \
+        "$DAEMON_SRC" -o "$OUT"
+}
+
 verify_macho_arch() {
     local PATH_TO_VERIFY="$1"
     local EXPECTED_ARCH="$2"
@@ -127,24 +175,37 @@ build_variant() {
     # 只有 arm64 的 bundle 会被 dyld 以 incompatible architecture 拒绝加载，
     # 故 rootless 也需把面板编成胖 arm64+arm64e（arm64 切片保留对 A11 的兼容）。
     local PREFS_MACHO_ARCHS="${5:-$MACHO_ARCHS}"
+    # 管理器 App 与 updater daemon 是独立进程，arm64 单切片即可运行；
+    # roothide 用胖切片以匹配其全 arm64e 要求。
+    local APP_MACHO_ARCHS="${6:-$MACHO_ARCHS}"
 
     local STAGE="$BUILD_DIR/stage-$VARIANT"
     local DEB_OUT="$BUILD_DIR/${PKG_NAME}_${VERSION}_${VARIANT}.deb"
     local LOADER_OUT="$BUILD_DIR/_loader-${VARIANT}/IOSDecryptHubLoader.dylib"
     local PREFS_BUNDLE="$BUILD_DIR/_prefs-${VARIANT}/IOSDecryptHubPrefs.bundle"
+    local APP_EXEC="$BUILD_DIR/_app-${VARIANT}/$APP_NAME"
+    local DAEMON_OUT="$BUILD_DIR/_daemon-${VARIANT}/$DAEMON_BIN"
     local ENGINE_DYLIB
 
     ENGINE_DYLIB=$(require_vendor_dylib "$VARIANT" "$MACHO_ARCHS")
     compile_loader "$MACHO_ARCHS" "$LOADER_OUT"
     compile_prefs "$PREFS_MACHO_ARCHS" "$PREFS_BUNDLE"
+    compile_app "$APP_MACHO_ARCHS" "$APP_EXEC"
+    compile_daemon "$APP_MACHO_ARCHS" "$DAEMON_OUT"
 
     info "打包 $VARIANT (arch=$ARCHITECTURE, prefix=${PREFIX:-/})..."
     rm -rf "$STAGE"
+    # SMB 等网络卷 chmod 无效（文件全是 700），dpkg-deb 会拒绝打包：
+    # 真正的打包树放在本地临时目录并在那里修正权限；断言仍读 $STAGE（内容一致）。
+    local PKG_STAGE="${TMPDIR:-/tmp}/dhstage-$VARIANT"
+    rm -rf "$PKG_STAGE"
     mkdir -p "$STAGE/DEBIAN"
     mkdir -p "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries"
     mkdir -p "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub"
     mkdir -p "$STAGE/${PREFIX}/Library/PreferenceBundles"
     mkdir -p "$STAGE/${PREFIX}/Library/PreferenceLoader/Preferences"
+    mkdir -p "$STAGE/${PREFIX}/Applications/$APP_NAME.app"
+    mkdir -p "$STAGE/${PREFIX}/Library/LaunchDaemons"
 
     cat > "$STAGE/DEBIAN/control" << CTRL
 Package: ${PKG_NAME}
@@ -165,6 +226,31 @@ CTRL
     cp "$ENGINE_DYLIB" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/decrypt_helper.dylib"
     cp "$SCRIPT_DIR/enabledBundles.default.plist" \
         "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/enabledBundles.default.plist"
+    cp "$DAEMON_OUT" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN"
+
+    cat > "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/version.plist" << VP
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>version</key>
+    <string>${VERSION}</string>
+    <key>variant</key>
+    <string>${VARIANT}</string>
+    <key>arch</key>
+    <string>${MACHO_ARCHS}</string>
+</dict>
+</plist>
+VP
+
+    sed "s|@PREFIX@|${PREFIX}|g" "$DAEMON_PLIST_TMPL" \
+        > "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist"
+
+    cp "$APP_EXEC" "$STAGE/${PREFIX}/Applications/$APP_NAME.app/$APP_NAME"
+    sed "s/@VERSION@/${VERSION}/g" "$APP_INFO" \
+        > "$STAGE/${PREFIX}/Applications/$APP_NAME.app/Info.plist"
+    [ -f "$PREFS_ICON" ] || error "缺少 prefs/icon.png (App 图标)"
+    cp "$PREFS_ICON" "$STAGE/${PREFIX}/Applications/$APP_NAME.app/Icon.png"
 
     cat > "$STAGE/DEBIAN/postinst" << POSTINST
 #!/bin/sh
@@ -184,6 +270,34 @@ fi
 chown mobile:mobile "\$CONFIG_DIR" "\$CONFIG_PATH" 2>/dev/null || true
 chmod 0755 "\$CONFIG_DIR"
 chmod 0644 "\$CONFIG_PATH"
+ENGINE_DIR="${PREFIX}/usr/lib/IOSDecryptHub"
+# 引擎与 updater 由 root 专属管理（daemon 写，App 只读）
+chown root:wheel "\$ENGINE_DIR" "\$ENGINE_DIR"/decrypt_helper.dylib* "\$ENGINE_DIR"/$DAEMON_BIN "\$ENGINE_DIR"/version.plist 2>/dev/null || true
+chmod 0755 "\$ENGINE_DIR" "\$ENGINE_DIR"/decrypt_helper.dylib "\$ENGINE_DIR"/$DAEMON_BIN 2>/dev/null || true
+chmod 0644 "\$ENGINE_DIR"/version.plist 2>/dev/null || true
+# daemon 状态文件（root 写 0644，App 读）
+STATE_PATH="\$ENGINE_DIR/state.plist"
+if [ ! -f "\$STATE_PATH" ]; then
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<plist version="1.0"><dict/></plist>' > "\$STATE_PATH"
+fi
+chmod 0644 "\$STATE_PATH" 2>/dev/null || true
+# 更新请求文件（mobile 可写，daemon 读；launchd WatchPaths 依赖它事先存在）
+REQUEST_PATH="/var/mobile/Library/Preferences/com.iosdecrypthub.updater.request.plist"
+if [ ! -f "\$REQUEST_PATH" ]; then
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<plist version="1.0"><dict><key>action</key><string>none</string></dict></plist>' > "\$REQUEST_PATH"
+fi
+chown mobile:mobile "\$REQUEST_PATH" 2>/dev/null || true
+chmod 0644 "\$REQUEST_PATH" 2>/dev/null || true
+# 拉起 updater daemon（一次性进程，按需运行；失败不阻断安装）
+LAUNCHD_PLIST="${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist"
+if command -v launchctl >/dev/null 2>&1; then
+    launchctl bootout system "\$LAUNCHD_PLIST" 2>/dev/null || true
+    launchctl bootstrap system "\$LAUNCHD_PLIST" 2>/dev/null || launchctl load "\$LAUNCHD_PLIST" 2>/dev/null || true
+fi
+# 刷新主屏幕图标（失败不阻断安装）
+if command -v uicache >/dev/null 2>&1; then
+    uicache -p "${PREFIX}/Applications/$APP_NAME.app" 2>/dev/null || true
+fi
 exit 0
 POSTINST
     chmod 0755 "$STAGE/DEBIAN/postinst"
@@ -191,9 +305,16 @@ POSTINST
     cat > "$STAGE/DEBIAN/postrm" << POSTRM
 #!/bin/sh
 set -e
+if [ "\$1" = "remove" ]; then
+    LAUNCHD_PLIST="${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist"
+    if command -v launchctl >/dev/null 2>&1; then
+        launchctl bootout system "\$LAUNCHD_PLIST" 2>/dev/null || true
+    fi
+fi
 if [ "\$1" = "purge" ]; then
     rm -rf "${PREFIX}/usr/lib/IOSDecryptHub"
     rm -f "/var/mobile/Library/Preferences/com.iosdecrypthub.loader.plist"
+    rm -f "/var/mobile/Library/Preferences/com.iosdecrypthub.updater.request.plist"
 fi
 exit 0
 POSTRM
@@ -211,12 +332,32 @@ POSTRM
     verify_macho_arch \
         "$STAGE/${PREFIX}/Library/PreferenceBundles/IOSDecryptHubPrefs.bundle/IOSDecryptHubPrefs" \
         "$PREFS_MACHO_ARCHS" "$VARIANT 设置面板"
+    verify_macho_arch \
+        "$STAGE/${PREFIX}/Applications/$APP_NAME.app/$APP_NAME" \
+        "$APP_MACHO_ARCHS" "$VARIANT 管理器 App"
+    verify_macho_arch \
+        "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN" \
+        "$APP_MACHO_ARCHS" "$VARIANT updater daemon"
 
     ldid -S "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.dylib"
     ldid -S "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/decrypt_helper.dylib"
     ldid -S "$STAGE/${PREFIX}/Library/PreferenceBundles/IOSDecryptHubPrefs.bundle/IOSDecryptHubPrefs"
+    ldid -S"$APP_ENTITLEMENTS" "$STAGE/${PREFIX}/Applications/$APP_NAME.app/$APP_NAME"
+    ldid -S "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN"
 
-    dpkg-deb --build --root-owner-group "$STAGE" "$DEB_OUT" >/dev/null 2>&1
+    cp -R "$STAGE/." "$PKG_STAGE/"
+    find "$PKG_STAGE" -type d -exec chmod 0755 {} +
+    find "$PKG_STAGE" -type f -exec chmod 0644 {} +
+    chmod 0755 "$PKG_STAGE/DEBIAN"
+    chmod 0755 "$PKG_STAGE/DEBIAN"/postinst "$PKG_STAGE/DEBIAN"/postrm
+    chmod 0755 "$PKG_STAGE/${PREFIX}/Applications/$APP_NAME.app/$APP_NAME"
+    chmod 0755 "$PKG_STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN"
+
+    if ! dpkg-deb --build --root-owner-group "$PKG_STAGE" "$DEB_OUT" 2>"$BUILD_DIR/_dpkg-$VARIANT.log"; then
+        rm -rf "$PKG_STAGE"
+        error "$VARIANT dpkg-deb 失败: $(head -3 "$BUILD_DIR/_dpkg-$VARIANT.log")"
+    fi
+    rm -rf "$PKG_STAGE"
 
     local ACTUAL_ARCH ACTUAL_DEPENDS PACKAGE_CONTENTS
     ACTUAL_ARCH=$(dpkg-deb -f "$DEB_OUT" Architecture)
@@ -273,9 +414,53 @@ POSTRM
         *) error "$VARIANT 缺少加载器" ;;
     esac
 
+    case "$PACKAGE_CONTENTS" in
+        *"/Applications/$APP_NAME.app/$APP_NAME"*) ;;
+        *) error "$VARIANT 缺少管理器 App" ;;
+    esac
+
+    case "$PACKAGE_CONTENTS" in
+        *"/Applications/$APP_NAME.app/Info.plist"*) ;;
+        *) error "$VARIANT 缺少 App Info.plist" ;;
+    esac
+
+    case "$PACKAGE_CONTENTS" in
+        *"/usr/lib/IOSDecryptHub/$DAEMON_BIN"*) ;;
+        *) error "$VARIANT 缺少 updater daemon" ;;
+    esac
+
+    case "$PACKAGE_CONTENTS" in
+        *"/Library/LaunchDaemons/com.iosdecrypthub.updated.plist"*) ;;
+        *) error "$VARIANT 缺少 daemon 启动配置" ;;
+    esac
+
+    case "$PACKAGE_CONTENTS" in
+        *"/usr/lib/IOSDecryptHub/version.plist"*) ;;
+        *) error "$VARIANT 缺少引擎版本文件" ;;
+    esac
+
     grep -q '<string>com.apple.UIKit</string>' \
         "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.plist" \
         || error "$VARIANT 的 MobileLoader 过滤器未覆盖 UIKit App"
+
+    grep -q '<string>com.iosdecrypthub.updated</string>' \
+        "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist" \
+        || error "$VARIANT 的 daemon 启动配置 Label 错误"
+
+    grep -q "<string>${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN</string>" \
+        "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist" \
+        || error "$VARIANT 的 daemon 可执行路径与前缀不一致"
+
+    grep -q "<string>${VERSION}</string>" \
+        "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/version.plist" \
+        || error "$VARIANT 的引擎版本文件未写入当前版本"
+    grep -q "<string>${VARIANT}</string>" \
+        "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/version.plist" \
+        || error "$VARIANT 的引擎版本文件未写入变体名"
+
+    grep -q "<string>${VERSION}</string>" \
+        "$STAGE/${PREFIX}/Applications/$APP_NAME.app/Info.plist" \
+        || error "$VARIANT 的 App Info.plist 未写入当前版本"
 
     info "✅ $DEB_OUT ($(du -h "$DEB_OUT" | cut -f1))"
 }
@@ -285,17 +470,17 @@ mkdir -p "$BUILD_DIR"
 case "$TARGET" in
     all)
         build_variant "rootless" "/var/jb" \
-            "iphoneos-arm64" "arm64" "arm64 arm64e"
+            "iphoneos-arm64" "arm64" "arm64 arm64e" "arm64"
         build_variant "roothide" "" \
-            "iphoneos-arm64e" "arm64 arm64e"
+            "iphoneos-arm64e" "arm64 arm64e" "arm64 arm64e" "arm64 arm64e"
         ;;
     rootless)
         build_variant "rootless" "/var/jb" \
-            "iphoneos-arm64" "arm64" "arm64 arm64e"
+            "iphoneos-arm64" "arm64" "arm64 arm64e" "arm64"
         ;;
     roothide)
         build_variant "roothide" "" \
-            "iphoneos-arm64e" "arm64 arm64e"
+            "iphoneos-arm64e" "arm64 arm64e" "arm64 arm64e" "arm64 arm64e"
         ;;
 esac
 

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.iosdecrypthub.updated</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@PREFIX@/usr/lib/IOSDecryptHub/IOSDecryptHubUpdated</string>
+    </array>
+    <key>WatchPaths</key>
+    <array>
+        <string>/var/mobile/Library/Preferences/com.iosdecrypthub.updater.request.plist</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>43200</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/var/log/iosdecrypthub-updated.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/iosdecrypthub-updated.log</string>
+</dict>
+</plist>
