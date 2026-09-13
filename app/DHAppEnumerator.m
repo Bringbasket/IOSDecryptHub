@@ -1,7 +1,11 @@
-// DHAppEnumerator.m — 逻辑与设置面板保持一致（同一份私有 API 最小声明）
+// DHAppEnumerator.m
 
 #import "DHAppEnumerator.h"
 #import <dlfcn.h>
+#import <objc/message.h>
+
+@implementation DHAppInfo
+@end
 
 @interface NSObject (DHLaunchServices)
 + (instancetype)defaultWorkspace;
@@ -9,47 +13,50 @@
 - (NSString *)applicationIdentifier;
 - (NSString *)localizedName;
 - (NSString *)applicationType;
+- (NSURL *)bundleURL;
 @end
 
-static NSDictionary<NSString *, NSString *> *dh_apps_from_launch_services(void) {
+static NSDictionary<NSString *, id> *dh_collect(void) {
+    // bundleID -> @{@"name": ..., @"path": ...}
+    NSMutableDictionary<NSString *, NSDictionary *> *apps = [NSMutableDictionary dictionary];
+    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
     static const char *frameworks[] = {
         "/System/Library/PrivateFrameworks/MobileCoreServices.framework/MobileCoreServices",
         "/System/Library/Frameworks/CoreServices.framework/CoreServices",
         NULL,
     };
-    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
     for (NSUInteger i = 0; !workspaceClass && frameworks[i]; i++) {
         dlopen(frameworks[i], RTLD_LAZY | RTLD_LOCAL);
         workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
     }
-    if (!workspaceClass || ![workspaceClass respondsToSelector:@selector(defaultWorkspace)]) {
-        return @{};
-    }
-    NSMutableDictionary<NSString *, NSString *> *apps = [NSMutableDictionary dictionary];
     @try {
-        id workspace = [workspaceClass defaultWorkspace];
-        NSArray *proxies = [workspace respondsToSelector:@selector(allApplications)]
-            ? [workspace allApplications] : nil;
-        for (id proxy in proxies) {
-            NSString *bundleID = [proxy respondsToSelector:@selector(applicationIdentifier)]
-                ? [proxy applicationIdentifier] : nil;
-            if (bundleID.length == 0 || [bundleID hasPrefix:@"com.apple."]) continue;
-            NSString *type = [proxy respondsToSelector:@selector(applicationType)]
-                ? [proxy applicationType] : nil;
-            if (type.length > 0 && ![type isEqualToString:@"User"]) continue;
-            NSString *name = [proxy respondsToSelector:@selector(localizedName)]
-                ? [proxy localizedName] : nil;
-            apps[bundleID] = name.length > 0 ? name : bundleID;
+        if (workspaceClass && [workspaceClass respondsToSelector:@selector(defaultWorkspace)]) {
+            id workspace = [workspaceClass defaultWorkspace];
+            NSArray *proxies = [workspace respondsToSelector:@selector(allApplications)]
+                ? [workspace allApplications] : nil;
+            for (id proxy in proxies) {
+                NSString *bundleID = [proxy respondsToSelector:@selector(applicationIdentifier)]
+                    ? [proxy applicationIdentifier] : nil;
+                if (bundleID.length == 0 || [bundleID hasPrefix:@"com.apple."]) continue;
+                NSString *type = [proxy respondsToSelector:@selector(applicationType)]
+                    ? [proxy applicationType] : nil;
+                if (type.length > 0 && ![type isEqualToString:@"User"]) continue;
+                NSString *name = [proxy respondsToSelector:@selector(localizedName)]
+                    ? [proxy localizedName] : nil;
+                NSString *path = nil;
+                if ([proxy respondsToSelector:@selector(bundleURL)]) {
+                    id url = [proxy bundleURL];
+                    if ([url isKindOfClass:[NSURL class]]) path = [url path];
+                }
+                apps[bundleID] = @{ @"name": name.length ? name : bundleID,
+                                    @"path": path ?: @"" };
+            }
         }
     } @catch (__unused NSException *e) {
-        return @{};
+        apps = [NSMutableDictionary dictionary];
     }
-    return apps;
-}
 
-static NSDictionary<NSString *, NSString *> *dh_apps_from_filesystem(void) {
-    NSMutableDictionary<NSString *, NSString *> *apps = [NSMutableDictionary dictionary];
-    @try {
+    if (apps.count == 0) {  // 兜底：直接扫容器目录（LaunchServices 不可用时）
         NSFileManager *fm = [NSFileManager defaultManager];
         NSArray<NSString *> *containers =
             [fm contentsOfDirectoryAtPath:@"/var/containers/Bundle/Application" error:nil];
@@ -57,21 +64,79 @@ static NSDictionary<NSString *, NSString *> *dh_apps_from_filesystem(void) {
             NSString *base = [@"/var/containers/Bundle/Application" stringByAppendingPathComponent:container];
             for (NSString *entry in [fm contentsOfDirectoryAtPath:base error:nil]) {
                 if (![entry.pathExtension.lowercaseString isEqualToString:@"app"]) continue;
+                NSString *appPath = [base stringByAppendingPathComponent:entry];
                 NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
-                    [[base stringByAppendingPathComponent:entry] stringByAppendingPathComponent:@"Info.plist"]];
+                    [appPath stringByAppendingPathComponent:@"Info.plist"]];
                 NSString *bundleID = info[@"CFBundleIdentifier"];
                 if (bundleID.length == 0 || [bundleID hasPrefix:@"com.apple."]) continue;
                 NSString *name = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"];
-                apps[bundleID] = name.length > 0 ? name : bundleID;
+                apps[bundleID] = @{ @"name": name.length ? name : bundleID, @"path": appPath };
             }
         }
-    } @catch (__unused NSException *e) {
     }
     return apps;
 }
 
-NSDictionary<NSString *, NSString *> *DHInstalledApps(void) {
-    NSDictionary<NSString *, NSString *> *apps = dh_apps_from_launch_services();
-    if (apps.count == 0) apps = dh_apps_from_filesystem();
-    return apps ?: @{};
+NSArray<DHAppInfo *> *DHInstalledApps(void) {
+    NSDictionary<NSString *, NSDictionary *> *raw = dh_collect();
+    NSMutableArray<DHAppInfo *> *out = [NSMutableArray arrayWithCapacity:raw.count];
+    for (NSString *bundleID in raw) {
+        DHAppInfo *app = [[DHAppInfo alloc] init];
+        app.bundleID = bundleID;
+        app.name = raw[bundleID][@"name"];
+        NSString *path = raw[bundleID][@"path"];
+        app.bundlePath = path.length ? path : nil;
+        [out addObject:app];
+    }
+    [out sortUsingComparator:^NSComparisonResult(DHAppInfo *l, DHAppInfo *r) {
+        return [l.name localizedCaseInsensitiveCompare:r.name];
+    }];
+    return out;
+}
+
+UIImage *DHAppIcon(NSString *bundleID, NSString *_Nullable bundlePath) {
+    static NSMutableDictionary<NSString *, UIImage *> *cache = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+    if (bundleID.length == 0) return nil;
+    if (cache[bundleID]) return cache[bundleID];
+
+    UIImage *icon = nil;
+    // 系统图标缓存（越狱环境下可用，尺寸/圆角都由系统给）
+    SEL sel = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:scale:");
+    if ([UIImage respondsToSelector:sel]) {
+        @try {
+            CGFloat scale = [UIScreen mainScreen].scale;
+            id (*msg)(id, SEL, id, CGFloat) = (id (*)(id, SEL, id, CGFloat))objc_msgSend;
+            icon = msg([UIImage class], sel, bundleID, scale);
+        } @catch (__unused NSException *e) {
+            icon = nil;
+        }
+    }
+    // 兜底：读 bundle 内声明的图标文件
+    if (!icon && bundlePath.length) {
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+            [bundlePath stringByAppendingPathComponent:@"Info.plist"]];
+        NSMutableArray<NSString *> *names = [NSMutableArray array];
+        id icons = info[@"CFBundleIcons"];
+        id primary = [icons isKindOfClass:[NSDictionary class]] ? icons[@"CFBundlePrimaryIcon"] : nil;
+        id files = [primary isKindOfClass:[NSDictionary class]] ? primary[@"CFBundleIconFiles"] : nil;
+        if ([files isKindOfClass:[NSArray class]]) [names addObjectsFromArray:files];
+        id legacy = info[@"CFBundleIconFiles"];
+        if ([legacy isKindOfClass:[NSArray class]]) [names addObjectsFromArray:legacy];
+        NSString *single = info[@"CFBundleIconFile"];
+        if ([single isKindOfClass:[NSString class]]) [names addObject:single];
+        for (NSString *name in names) {
+            NSString *base = [name stringByDeletingPathExtension];
+            for (NSString *suffix in @[ @"@3x", @"@2x", @"" ]) {
+                NSString *file = [bundlePath stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@"%@%@.png", base, suffix]];
+                UIImage *candidate = [UIImage imageWithContentsOfFile:file];
+                if (candidate) { icon = candidate; break; }
+            }
+            if (icon) break;
+        }
+    }
+    if (icon) cache[bundleID] = icon;
+    return icon;
 }
