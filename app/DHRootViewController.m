@@ -40,7 +40,7 @@ static NSString *dh_time_ago(NSTimeInterval ts) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"解密助手";
+    self.title = @"IOSDecryptHub";
     self.enabled = [NSMutableSet set];
     CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
     CFNotificationCenterAddObserver(center, (__bridge const void *)self,

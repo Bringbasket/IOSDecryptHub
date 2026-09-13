@@ -13,7 +13,7 @@ https://ios.decrypthub.com
 - rootless（Dopamine、palera1n）：rootless.deb
 - roothide：roothide.deb
 
-装好后桌面上会多一个 **解密助手** 图标（管理器 App）；设置里也会多一项 **设置 → IOSDecryptHub**，两处都能开关目标 App。打开目标 App 前先完全退出，再启动即可注入。浏览器打开 `http://<设备IP>:8088`，即可看到实时 Web 面板：
+装好后桌面上会多一个 **IOSDecryptHub** 图标（管理器 App）；设置里也会多一项 **设置 → IOSDecryptHub**，两处都能开关目标 App。打开目标 App 前先完全退出，再启动即可注入。浏览器打开 `http://<设备IP>:8088`，即可看到实时 Web 面板：
 
 <p align="center">
   <img src="./docs/screenshots/webui.png" alt="IOSDecryptHub Web 面板：加解密事件列表与输入明文 / HEX / HEXDUMP 详情" width="920">

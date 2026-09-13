@@ -11,7 +11,7 @@
 |------|----------------|------|
 | 包已装 | `dpkg -l com.iosdecrypthub` | 版本 1.25.0（测试包为 1.24.11） |
 | App 文件在 | `ls /var/jb/Applications/IOSDecryptHubManager.app` | 存在（roothide 去掉 `/var/jb`） |
-| 桌面图标 | 主屏出现「解密助手」 | 出现；没出现就 `uicache -p <上面那个路径>` |
+| 桌面图标 | 主屏出现「IOSDecryptHub」 | 出现；没出现就 `uicache -p <上面那个路径>` |
 | 能启动 | 点开 App | 不闪退，看到"状态/软件更新/注入应用/关于"四段 |
 
 > 最大不确定项是 App 的 `platform-application` 提权能否让它读写越狱路径。

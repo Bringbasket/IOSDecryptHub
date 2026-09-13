@@ -5,11 +5,23 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
-    <string>解密助手</string>
+    <string>IOSDecryptHub</string>
     <key>CFBundleExecutable</key>
     <string>IOSDecryptHubManager</string>
     <key>CFBundleIconFile</key>
     <string>Icon</string>
+    <key>CFBundleIcons</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconFiles</key>
+            <array>
+                <string>Icon</string>
+                <string>Icon@2x</string>
+                <string>Icon@3x</string>
+            </array>
+        </dict>
+    </dict>
     <key>CFBundleIdentifier</key>
     <string>com.iosdecrypthub.manager</string>
     <key>CFBundleInfoDictionaryVersion</key>
