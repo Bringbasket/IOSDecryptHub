@@ -1,24 +1,32 @@
-// DHRootViewController.m — 主界面
+// DHRootViewController.m — 主界面：管理与查看注入的 App
 //
 // 设计取向（按使用逻辑，不按实现）：
-//   - 打开就是"我开了哪些 App"，不是引擎状态、不是版本号
-//   - 顶部搜索：App 多了也能立刻找到
-//   - 已启用置顶，随时知道自己注入了什么、一键关掉
-//   - 每行只有图标 + 名称 + 开关（bundle id 作次要信息，便于反馈问题时对照）
-//   - 提示文案只留真正需要用户做动作的那一句
+//   - 打开就是"我开了哪些 App"；顶部可过滤出「已启用」
+//   - 全部应用按首字母分组，右侧有快速导航索引（中文按拼音首字母）
+//   - 每行只有图标（R 角）+ 名称 + 开关；取不到图标时用首字母默认图标，绝不空着
+//   - 提示文案只留一句真正需要用户做动作的
 
 #import "DHRootViewController.h"
 #import "DHSettingsViewController.h"
 #import "DHConfigStore.h"
 #import "DHAppEnumerator.h"
 
+typedef NS_ENUM(NSInteger, DHFilter) {
+    DHFilterAll = 0,
+    DHFilterEnabled,
+};
+
 @interface DHRootViewController () <UISearchResultsUpdating>
 @property (nonatomic, copy) NSArray<DHAppInfo *> *allApps;
-@property (nonatomic, copy) NSArray<DHAppInfo *> *enabledApps;
-@property (nonatomic, copy) NSArray<DHAppInfo *> *matchedApps;   // 搜索结果
 @property (nonatomic, strong) NSMutableSet<NSString *> *enabled;
+@property (nonatomic, copy) NSArray<NSArray<DHAppInfo *> *> *sections;
+@property (nonatomic, copy) NSArray<NSString *> *sectionHeaders;
+@property (nonatomic, copy) NSArray<NSString *> *sectionIndexes;
+@property (nonatomic, copy) NSArray<DHAppInfo *> *matched;
 @property (nonatomic, strong) UISearchController *search;
+@property (nonatomic, strong) UISegmentedControl *filter;
 @property (nonatomic, assign) BOOL searching;
+@property (nonatomic, assign) BOOL enabledOnly;
 @end
 
 @implementation DHRootViewController
@@ -27,9 +35,14 @@
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"IOSDecryptHub";
     self.tableView.rowHeight = 56;
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    self.tableView.sectionIndexMinimumDisplayRowCount = 12;
+
+    self.filter = [[UISegmentedControl alloc] initWithItems:@[ @"全部", @"已启用" ]];
+    self.filter.selectedSegmentIndex = 0;
+    [self.filter addTarget:self action:@selector(filterChanged) forControlEvents:UIControlEventValueChanged];
+    self.navigationItem.titleView = self.filter;
 
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
         initWithImage:[UIImage systemImageNamed:@"gearshape"]
@@ -51,88 +64,142 @@
     [self reload];
 }
 
-- (void)reload {
-    self.allApps = DHInstalledApps();
-    self.enabled = [[DHReadEnabledBundles() mutableCopy] ?: [NSMutableSet set] mutableCopy];
-
-    NSMutableArray<DHAppInfo *> *enabledApps = [NSMutableArray array];
-    for (DHAppInfo *app in self.allApps) {
-        if ([self.enabled containsObject:app.bundleID]) [enabledApps addObject:app];
-    }
-    self.enabledApps = enabledApps;
-    [self updateSearchResultsForSearchController:self.search];
-    [self.tableView reloadData];
-}
-
 - (void)openSettings {
     DHSettingsViewController *settings = [[DHSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
     [self.navigationController pushViewController:settings animated:YES];
 }
 
-#pragma mark - 搜索
-
-- (void)updateSearchResultsForSearchController:(__unused UISearchController *)controller {
-    NSString *query = [self.search.searchBar.text
-        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    self.searching = query.length > 0;
-    if (!self.searching) {
-        self.matchedApps = @[];
-        return;
-    }
-    NSPredicate *predicate = [NSPredicate predicateWithBlock:^BOOL(DHAppInfo *app, __unused NSDictionary *bindings) {
-        return [app.name localizedCaseInsensitiveContainsString:query] ||
-               [app.bundleID localizedCaseInsensitiveContainsString:query];
-    }];
-    self.matchedApps = [self.allApps filteredArrayUsingPredicate:predicate];
+- (void)filterChanged {
+    self.enabledOnly = (self.filter.selectedSegmentIndex == DHFilterEnabled);
+    [self rebuild];
     [self.tableView reloadData];
 }
 
-#pragma mark - 数据源
+#pragma mark - 数据
 
-- (NSArray<DHAppInfo *> *)appsInSection:(NSInteger)section {
-    if (self.searching) return self.matchedApps;
-    if (section == 0 && self.enabledApps.count > 0) return self.enabledApps;
-    return self.allApps;
+- (void)reload {
+    self.allApps = DHInstalledApps();
+    self.enabled = [[DHReadEnabledBundles() mutableCopy] ?: [NSMutableSet set] mutableCopy];
+    [self rebuild];
+    [self.tableView reloadData];
 }
 
-- (NSInteger)numberOfSectionsInTableView:(__unused UITableView *)tableView {
-    if (self.searching) return 1;
-    return self.enabledApps.count > 0 ? 2 : 1;
+- (void)updateSearchResultsForSearchController:(__unused UISearchController *)controller {
+    [self rebuild];
+    [self.tableView reloadData];
 }
+
+/// 按「过滤 → 搜索 → 首字母分组」重建分区
+- (void)rebuild {
+    NSString *query = [self.search.searchBar.text
+        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    self.searching = query.length > 0;
+
+    NSMutableArray<DHAppInfo *> *pool = [NSMutableArray array];
+    for (DHAppInfo *app in self.allApps) {
+        if (self.enabledOnly && ![self.enabled containsObject:app.bundleID]) continue;
+        if (self.searching &&
+            ![app.name localizedCaseInsensitiveContainsString:query] &&
+            ![app.bundleID localizedCaseInsensitiveContainsString:query]) continue;
+        [pool addObject:app];
+    }
+
+    if (self.searching) {   // 搜索结果不分组，直接平铺
+        self.sections = @[ pool ];
+        self.sectionHeaders = @[ @"" ];
+        self.sectionIndexes = @[];
+        return;
+    }
+
+    NSMutableArray<NSArray<DHAppInfo *> *> *sections = [NSMutableArray array];
+    NSMutableArray<NSString *> *headers = [NSMutableArray array];
+    NSMutableArray<NSString *> *indexes = [NSMutableArray array];
+
+    if (!self.enabledOnly) {   // 已启用置顶，随时知道注入了什么
+        NSMutableArray<DHAppInfo *> *enabledApps = [NSMutableArray array];
+        for (DHAppInfo *app in pool) {
+            if ([self.enabled containsObject:app.bundleID]) [enabledApps addObject:app];
+        }
+        if (enabledApps.count > 0) {
+            [sections addObject:enabledApps];
+            [headers addObject:[NSString stringWithFormat:@"已启用 %lu", (unsigned long)enabledApps.count]];
+            [indexes addObject:@"★"];
+        }
+    }
+
+    // 按（首字母, 名称）排序后分组；中文名字用拼音首字母
+    NSArray<DHAppInfo *> *sorted = [pool sortedArrayUsingComparator:^NSComparisonResult(DHAppInfo *l, DHAppInfo *r) {
+        NSComparisonResult byLetter = [DHAppIndexLetter(l.name) compare:DHAppIndexLetter(r.name)];
+        return byLetter != NSOrderedSame ? byLetter : [l.name localizedCaseInsensitiveCompare:r.name];
+    }];
+    NSString *current = nil;
+    NSMutableArray<DHAppInfo *> *bucket = nil;
+    for (DHAppInfo *app in sorted) {
+        NSString *letter = DHAppIndexLetter(app.name);
+        if (![letter isEqualToString:current]) {
+            if (bucket) { [sections addObject:bucket]; [headers addObject:current]; [indexes addObject:current]; }
+            bucket = [NSMutableArray array];
+            current = letter;
+        }
+        [bucket addObject:app];
+    }
+    if (bucket) { [sections addObject:bucket]; [headers addObject:current]; [indexes addObject:current]; }
+
+    self.sections = sections;
+    self.sectionHeaders = headers;
+    self.sectionIndexes = indexes;
+}
+
+#pragma mark - 表格
+
+- (NSInteger)numberOfSectionsInTableView:(__unused UITableView *)tableView { return self.sections.count; }
 
 - (NSInteger)tableView:(__unused UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (!self.searching && section == 0 && self.enabledApps.count > 0) return self.enabledApps.count;
-    return MAX(self.allApps.count, 1);
+    return self.sections.count == 0 ? 1 : self.sections[section].count;   // 空态占一行
 }
 
 - (NSString *)tableView:(__unused UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    if (self.searching) return nil;
-    if (section == 0 && self.enabledApps.count > 0) {
-        return [NSString stringWithFormat:@"已启用 %lu", (unsigned long)self.enabledApps.count];
-    }
-    return @"全部应用";
+    if (self.sections.count == 0) return nil;
+    NSString *header = self.sectionHeaders[section];
+    return self.searching ? @"搜索结果" : header;
 }
 
 - (NSString *)tableView:(__unused UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    // 只留一句真正需要用户做动作的话
-    if (!self.searching && section == 0 && self.enabledApps.count > 0) {
+    // 只留一句真正需要用户做动作的话，挂在置顶的「已启用」下
+    if (!self.searching && !self.enabledOnly && self.sections.count > 0 && section == 0 &&
+        [self.sectionIndexes.firstObject isEqualToString:@"★"]) {
         return @"开启后需完全退出并重新打开目标 App 才会生效。";
     }
     return nil;
 }
 
+- (NSArray<NSString *> *)sectionIndexTitlesForTableView:(__unused UITableView *)tableView {
+    return self.searching ? @[] : self.sectionIndexes;
+}
+
+- (NSInteger)tableView:(__unused UITableView *)tableView sectionForSectionIndexTitle:(NSString *)title atIndex:(NSInteger)index {
+    return index;
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    NSArray<DHAppInfo *> *apps = [self appsInSection:indexPath.section];
-    if (apps.count == 0) {   // 空状态
+    if (self.sections.count == 0) {   // 空态
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-        cell.textLabel.text = self.allApps.count == 0 ? @"未能读取已安装应用" : @"没有匹配的 App";
-        cell.textLabel.textColor = [UIColor secondaryLabelColor];
         cell.textLabel.textAlignment = NSTextAlignmentCenter;
+        cell.textLabel.numberOfLines = 0;
+        cell.textLabel.textColor = [UIColor secondaryLabelColor];
+        cell.textLabel.font = [UIFont systemFontOfSize:14];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        if (self.allApps.count == 0) {
+            cell.textLabel.text = @"未能读取已安装应用";
+        } else if (self.searching) {
+            cell.textLabel.text = @"没有匹配的 App";
+        } else {
+            cell.textLabel.text = @"还没有启用任何 App\n在上面搜索，或从列表里打开开关";
+        }
         return cell;
     }
 
-    DHAppInfo *app = apps[indexPath.row];
+    DHAppInfo *app = self.sections[indexPath.section][indexPath.row];
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"app"];
     if (!cell) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"app"];
@@ -145,26 +212,23 @@
     }
     cell.textLabel.text = app.name;
     cell.detailTextLabel.text = app.bundleID;
-    cell.imageView.image = DHAppIcon(app.bundleID, app.bundlePath) ?: [UIImage systemImageNamed:@"app"];
+    cell.imageView.image = DHAppListIcon(app.bundleID, app.bundlePath, app.name);
     UISwitch *toggle = (UISwitch *)cell.accessoryView;
     toggle.on = [self.enabled containsObject:app.bundleID];
-    toggle.tag = indexPath.section * 10000 + indexPath.row;   // 仅用于回查位置
+    toggle.tag = indexPath.section * 10000 + indexPath.row;
     return cell;
 }
 
 #pragma mark - 开关
 
-- (DHAppInfo *)appForSwitch:(UISwitch *)toggle {
+- (void)toggleChanged:(UISwitch *)toggle {
     NSInteger section = toggle.tag / 10000;
     NSInteger row = toggle.tag % 10000;
-    NSArray<DHAppInfo *> *apps = [self appsInSection:section];
-    if (row < 0 || row >= (NSInteger)apps.count) return nil;
-    return apps[row];
-}
+    if (section >= (NSInteger)self.sections.count) return;
+    NSArray<DHAppInfo *> *apps = self.sections[section];
+    if (row < 0 || row >= (NSInteger)apps.count) return;
+    DHAppInfo *app = apps[row];
 
-- (void)toggleChanged:(UISwitch *)toggle {
-    DHAppInfo *app = [self appForSwitch:toggle];
-    if (!app) return;
     NSMutableSet<NSString *> *next = [self.enabled mutableCopy];
     if (toggle.on) [next addObject:app.bundleID]; else [next removeObject:app.bundleID];
     if (!DHWriteEnabledBundles(next)) {
@@ -175,8 +239,9 @@
         [self presentViewController:alert animated:YES completion:nil];
         return;
     }
-    // 名单变了就重建分区：新启用的立刻出现在「已启用」里
-    [self reload];
+    self.enabled = next;
+    [self rebuild];              // 新启用的立刻出现在置顶分区
+    [self.tableView reloadData];
 }
 
 @end
