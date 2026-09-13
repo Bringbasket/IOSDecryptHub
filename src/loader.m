@@ -50,12 +50,10 @@ static NSArray<NSString *> *dh_config_candidates(void) {
     return paths;
 }
 
-// 我们自己的组件不做注入：管理器 App 是管理界面、设置面板是设置界面，
-// 在它们上面再插一个悬浮窗纯属多余（用户反馈）。也避免用户误把自己打开。
-static BOOL dh_is_own_bundle(NSString *bundleID) {
-    return [bundleID isEqualToString:@"com.iosdecrypthub.manager"] ||
-           [bundleID isEqualToString:@"com.iosdecrypthub.prefs"];
-}
+// 说明：曾短暂加过"我们自己的组件不注入"的特例（想让管理器 App 里不弹悬浮窗），
+// 已撤销 —— 用户反馈里看到的悬浮窗真正原因是"开关被打开了"，不是产品行为异常。
+// 开关语义保持处处一致：列在名单里的 App 就会被注入，没有例外。
+// 相关：管理器 App 与设置面板同样出现在列表里，可以被显式打开（例如当服务宿主用）。
 
 // 读取偏好：判断当前 bundleID 是否在启用列表中
 static BOOL dh_should_inject(NSString *bundleID) {
@@ -64,8 +62,6 @@ static BOOL dh_should_inject(NSString *bundleID) {
     // 跳过系统关键进程（避免不必要的开销）
     if ([bundleID hasPrefix:@"com.apple."]) return NO;
 
-    // 跳过我们自己的组件
-    if (dh_is_own_bundle(bundleID)) return NO;
 
     NSArray *enabled = nil;
     @try {
