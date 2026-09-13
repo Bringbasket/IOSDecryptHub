@@ -27,6 +27,10 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 @property (nonatomic, strong) UISegmentedControl *filter;
 @property (nonatomic, assign) BOOL searching;
 @property (nonatomic, assign) BOOL enabledOnly;
+@property (nonatomic, strong) NSMutableArray<NSString *> *pendingRestart;   // 改了开关但还没重启的 App
+@property (nonatomic, strong) UIView *restartBanner;
+@property (nonatomic, strong) UILabel *restartBannerLabel;
+@property (nonatomic, strong) UIButton *restartBannerButton;
 @end
 
 @implementation DHRootViewController
@@ -35,6 +39,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    [self loadPendingRestart];
     self.tableView.rowHeight = 56;
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     self.tableView.sectionIndexMinimumDisplayRowCount = 12;
@@ -62,6 +67,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self reload];
+    [self prunePendingRestart];
 }
 
 - (void)openSettings {
@@ -155,7 +161,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 - (NSString *)tableView:(__unused UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     // 只留一句真正需要用户做动作的话，放在"已启用"页（管理开关的地方）
     if (!self.searching && self.enabledOnly && section == 0) {
-        return @"改动会在目标 App 重启后生效：若它正在运行，我们会自动帮你重启。";
+        return @"改动需要重启目标 App 才生效。";
     }
     return nil;
 }
@@ -301,13 +307,124 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     // 关掉/打开都只有重启目标 App 才生效。用户不知道这一点，所以由我们来判断：
     // 目标正在运行时自动重启它；没在运行时什么都不做（下次打开自然是新状态）。
     // 这样批量开关多个 App 时不会弹一堆确认框。
-    // 例外：本 App 自己。用户此刻正在用它，唯一必然在运行的就是它 —— 自杀式重启很荒唐，
-    // 而且它本来也不需要"重启生效"（改动下次打开自然是新状态）。
+    // 不替用户做动作：只在列表顶部告诉他"这个改动需要重启才生效"，并给一个按钮。
+    // 目标本来就没在运行的话不用提醒 —— 下次打开自然是新状态。
     NSString *selfBundle = [[NSBundle mainBundle] bundleIdentifier];
     BOOL isSelf = [app.bundleID isEqualToString:selfBundle];
     if (!isSelf && DHAppProcessRunning(app)) {
-        if (DHWriteRestartRequest(app.bundleID)) {
-            [self watchRestartResultFor:app.bundleID tellOnSuccess:YES];
+        [self markPendingRestart:app.bundleID];
+    } else {
+        [self clearPendingRestart:app.bundleID];
+    }
+}
+
+#pragma mark - 待重启横幅
+
+- (void)loadPendingRestart {
+    NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"dhPendingRestart"];
+    self.pendingRestart = [NSMutableArray array];
+    for (id item in saved) {
+        if ([item isKindOfClass:[NSString class]]) [self.pendingRestart addObject:item];
+    }
+}
+
+- (void)savePendingRestart {
+    [[NSUserDefaults standardUserDefaults] setObject:[self.pendingRestart copy] forKey:@"dhPendingRestart"];
+}
+
+- (void)markPendingRestart:(NSString *)bundleID {
+    if (bundleID.length == 0) return;
+    if (![self.pendingRestart containsObject:bundleID]) {
+        [self.pendingRestart addObject:bundleID];
+        [self savePendingRestart];
+    }
+    [self refreshRestartBanner];
+}
+
+- (void)clearPendingRestart:(NSString *)bundleID {
+    if ([self.pendingRestart containsObject:bundleID]) {
+        [self.pendingRestart removeObject:bundleID];
+        [self savePendingRestart];
+        [self refreshRestartBanner];
+    }
+}
+
+// 每次进入界面时清理：已经不在运行的 App 不用再提醒（下次打开自然是新状态）
+- (void)prunePendingRestart {
+    NSMutableDictionary<NSString *, DHAppInfo *> *map = [NSMutableDictionary dictionary];
+    for (DHAppInfo *app in self.allApps) map[app.bundleID] = app;
+    BOOL changed = NO;
+    for (NSString *bundleID in [self.pendingRestart copy]) {
+        DHAppInfo *app = map[bundleID];
+        if (!app || !DHAppProcessRunning(app)) {
+            [self.pendingRestart removeObject:bundleID];
+            changed = YES;
+        }
+    }
+    if (changed) [self savePendingRestart];
+    [self refreshRestartBanner];
+}
+
+- (NSString *)displayNameForBundle:(NSString *)bundleID {
+    for (DHAppInfo *app in self.allApps) {
+        if ([app.bundleID isEqualToString:bundleID]) return app.name;
+    }
+    return bundleID;
+}
+
+- (void)refreshRestartBanner {
+    if (self.pendingRestart.count == 0) {
+        self.tableView.tableHeaderView = nil;
+        return;
+    }
+    if (!self.restartBanner) {
+        UIView *banner = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 56)];
+        banner.backgroundColor = [UIColor secondarySystemBackgroundColor];
+        banner.layer.cornerRadius = 10;
+        banner.layer.masksToBounds = YES;
+
+        UILabel *label = [[UILabel alloc] init];
+        label.numberOfLines = 2;
+        label.font = [UIFont systemFontOfSize:13];
+        label.textColor = [UIColor labelColor];
+        [banner addSubview:label];
+
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+        button.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        [button addTarget:self action:@selector(restartPendingTapped) forControlEvents:UIControlEventTouchUpInside];
+        [banner addSubview:button];
+
+        self.restartBanner = banner;
+        self.restartBannerLabel = label;
+        self.restartBannerButton = button;
+    }
+
+    NSString *text;
+    NSString *title;
+    if (self.pendingRestart.count == 1) {
+        text = [NSString stringWithFormat:@"%@ 的改动需要重启才生效", [self displayNameForBundle:self.pendingRestart.firstObject]];
+        title = @"重启";
+    } else {
+        text = [NSString stringWithFormat:@"%lu 个 App 的改动需要重启才生效", (unsigned long)self.pendingRestart.count];
+        title = @"全部重启";
+    }
+    self.restartBannerLabel.text = text;
+    [self.restartBannerButton setTitle:title forState:UIControlStateNormal];
+
+    CGFloat width = CGRectGetWidth(self.tableView.bounds);
+    CGFloat height = 56;
+    self.restartBanner.frame = CGRectMake(0, 0, width, height);
+    CGFloat buttonWidth = 96;
+    self.restartBannerLabel.frame = CGRectMake(16, 0, width - buttonWidth - 32, height);
+    self.restartBannerButton.frame = CGRectMake(width - buttonWidth - 12, 0, buttonWidth, height);
+    self.tableView.tableHeaderView = self.restartBanner;
+}
+
+- (void)restartPendingTapped {
+    NSArray<NSString *> *targets = [self.pendingRestart copy];
+    for (NSString *bundleID in targets) {
+        if (DHWriteRestartRequest(bundleID)) {
+            [self clearPendingRestart:bundleID];
         }
     }
 }
