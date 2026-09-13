@@ -50,12 +50,22 @@ static NSArray<NSString *> *dh_config_candidates(void) {
     return paths;
 }
 
+// 我们自己的组件不做注入：管理器 App 是管理界面、设置面板是设置界面，
+// 在它们上面再插一个悬浮窗纯属多余（用户反馈）。也避免用户误把自己打开。
+static BOOL dh_is_own_bundle(NSString *bundleID) {
+    return [bundleID isEqualToString:@"com.iosdecrypthub.manager"] ||
+           [bundleID isEqualToString:@"com.iosdecrypthub.prefs"];
+}
+
 // 读取偏好：判断当前 bundleID 是否在启用列表中
 static BOOL dh_should_inject(NSString *bundleID) {
     if (!bundleID || bundleID.length == 0) return NO;
 
     // 跳过系统关键进程（避免不必要的开销）
     if ([bundleID hasPrefix:@"com.apple."]) return NO;
+
+    // 跳过我们自己的组件
+    if (dh_is_own_bundle(bundleID)) return NO;
 
     NSArray *enabled = nil;
     @try {

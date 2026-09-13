@@ -115,18 +115,6 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     NSMutableArray<NSString *> *headers = [NSMutableArray array];
     NSMutableArray<NSString *> *indexes = [NSMutableArray array];
 
-    if (!self.enabledOnly) {   // 已启用置顶，随时知道注入了什么
-        NSMutableArray<DHAppInfo *> *enabledApps = [NSMutableArray array];
-        for (DHAppInfo *app in pool) {
-            if ([self.enabled containsObject:app.bundleID]) [enabledApps addObject:app];
-        }
-        if (enabledApps.count > 0) {
-            [sections addObject:enabledApps];
-            [headers addObject:[NSString stringWithFormat:@"已启用 %lu", (unsigned long)enabledApps.count]];
-            [indexes addObject:@"★"];
-        }
-    }
-
     // 按（首字母, 名称）排序后分组；中文名字用拼音首字母
     NSArray<DHAppInfo *> *sorted = [pool sortedArrayUsingComparator:^NSComparisonResult(DHAppInfo *l, DHAppInfo *r) {
         NSComparisonResult byLetter = [DHAppIndexLetter(l.name) compare:DHAppIndexLetter(r.name)];
@@ -165,10 +153,9 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 }
 
 - (NSString *)tableView:(__unused UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    // 只留一句真正需要用户做动作的话，挂在置顶的「已启用」下
-    if (!self.searching && !self.enabledOnly && self.sections.count > 0 && section == 0 &&
-        [self.sectionIndexes.firstObject isEqualToString:@"★"]) {
-        return @"开启后需完全退出并重新打开目标 App 才会生效。";
+    // 只留一句真正需要用户做动作的话，放在"已启用"页（管理开关的地方）
+    if (!self.searching && self.enabledOnly && section == 0) {
+        return @"开关改动后需完全退出并重新打开目标 App 才会生效。";
     }
     return nil;
 }

@@ -17,6 +17,14 @@ typedef NS_ENUM(NSInteger, DHSection) {
 
 static NSString *const kDHWeChatAccount = @"DecryptHub";
 
+// 关于里的社群入口：公众号（图）在上面，这里是两个链接
+static NSArray<NSArray<NSString *> *> *dh_social_rows(void) {
+    return @[
+        @[ @"Telegram", @"@decrypthubteam", @"https://t.me/decrypthubteam" ],
+        @[ @"X", @"@decrypthub_", @"https://x.com/decrypthub_" ],
+    ];
+}
+
 // 图比例从 bundle 里读（首次布局时 cell 还没建，不能依赖 followView）
 static CGFloat dh_follow_aspect(void) {
     static CGFloat aspect = 0;
@@ -91,7 +99,7 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 - (NSInteger)tableView:(__unused UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case DHSectionUpdate: return self.hasUpdateRow ? 3 : 2;   // 检查更新 /[安装新版本]/ 历史版本
-        case DHSectionAbout:  return 2;                          // 公众号 + 版本
+        case DHSectionAbout:  return 2 + (NSInteger)dh_social_rows().count;   // 公众号 + 社群 + 版本
         default: return 0;
     }
 }
@@ -158,6 +166,16 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
         }
         return cell;
     }
+    NSArray<NSArray<NSString *> *> *social = dh_social_rows();
+    if (indexPath.row <= (NSInteger)social.count) {
+        NSArray<NSString *> *entry = social[indexPath.row - 1];
+        UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+        cell.textLabel.text = entry[0];
+        cell.detailTextLabel.text = entry[1];
+        cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        return cell;
+    }
     NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
     cell.textLabel.text = @"版本";
@@ -199,6 +217,14 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (self.working) return;
+    if (indexPath.section == DHSectionAbout) {
+        NSArray<NSArray<NSString *> *> *social = dh_social_rows();
+        if (indexPath.row >= 1 && indexPath.row <= (NSInteger)social.count) {
+            NSURL *url = [NSURL URLWithString:social[indexPath.row - 1][2]];
+            if (url) [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+        }
+        return;
+    }
     if (indexPath.section == DHSectionUpdate) {
         if (indexPath.row == 0) { [self checkUpdate]; return; }
         if (self.hasUpdateRow && indexPath.row == 1) { [self installUpdate]; return; }
