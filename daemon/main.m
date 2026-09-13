@@ -39,6 +39,11 @@ static void dh_log(const char *format, ...) {
     NSString *msg = [[NSString alloc] initWithFormat:nsfmt arguments:args];
     va_end(args);
     syslog(LOG_INFO, DH_TAG " %s", msg.UTF8String ?: "");
+    // 同时写 stderr：launchd 会按 StandardErrorPath 落到 /var/log/iosdecrypthub-updated.log。
+    // 只走 syslog 的话那个日志文件永远是空的，出问题时无从下手。
+    fputs((msg.UTF8String ?: ""), stderr);
+    fputc('\n', stderr);
+    fflush(stderr);
 }
 
 static NSDictionary *_Nullable dh_read_plist(NSString *path) {
