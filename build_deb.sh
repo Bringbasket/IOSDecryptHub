@@ -123,7 +123,7 @@ compile_app() {
     # shellcheck disable=SC2086
     $CC "${ARCH_FLAGS[@]}" -isysroot "$SDK" -miphoneos-version-min=14.0 \
         -ObjC -fobjc-arc -Wall -O2 \
-        -Isrc \
+        -I"$SCRIPT_DIR/src" \
         -framework Foundation -framework UIKit \
         $APP_SRCS -o "$OUT"
 }
@@ -140,7 +140,7 @@ compile_daemon() {
     mkdir -p "$(dirname "$OUT")"
     $CC "${ARCH_FLAGS[@]}" -isysroot "$SDK" -miphoneos-version-min=14.0 \
         -ObjC -fobjc-arc -Wall -O2 \
-        -Isrc \
+        -I"$SCRIPT_DIR/src" \
         -framework Foundation \
         "$DAEMON_SRC" -o "$OUT"
 }
