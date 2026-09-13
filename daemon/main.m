@@ -393,7 +393,14 @@ static NSDictionary<NSString *, NSString *> *dh_executable_map(void) {
     NSMutableDictionary<NSString *, NSString *> *map = [NSMutableDictionary dictionary];
     @try {
         NSFileManager *fm = [NSFileManager defaultManager];
-        NSArray<NSString *> *bases = @[@"/var/containers/Bundle/Application", @"/Applications"];
+        NSMutableArray<NSString *> *bases = [NSMutableArray arrayWithObject:@"/var/containers/Bundle/Application"];
+        // 越狱安装的 App 在 <jbroot>/Applications（rootless 是 /private/preboot/...，roothide 是 /），
+        // 只扫 /Applications 会漏掉它们 —— 表现为装完"重启 0 个应用"。
+        NSString *root = dh_bootstrap_root();
+        if (root.length > 1) {
+            [bases addObject:[root stringByAppendingPathComponent:@"Applications"]];
+        }
+        [bases addObject:@"/Applications"];
         for (NSString *base in bases) {
             for (NSString *container in [fm contentsOfDirectoryAtPath:base error:nil]) {
                 NSString *containerPath = [base stringByAppendingPathComponent:container];
