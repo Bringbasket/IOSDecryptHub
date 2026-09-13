@@ -107,11 +107,12 @@ NSDictionary *DHReadUpdaterState(void) {
     return @{};
 }
 
-BOOL DHWriteUpdateRequest(NSString *action) {
-    NSDictionary *req = @{
-        @"action": action ?: DH_REQ_NONE,
-        @"time": @([[NSDate date] timeIntervalSince1970]),
-    };
+BOOL DHWriteUpdateRequest(NSString *action, NSString *_Nullable version) {
+    NSMutableDictionary *request = [NSMutableDictionary dictionary];
+    request[@"action"] = action ?: DH_REQ_NONE;
+    request[@"time"] = @([[NSDate date] timeIntervalSince1970]);
+    if (version.length) request[@"version"] = version;   // 指定版本安装（历史版本）
+    NSDictionary *req = request;
     @try {
         return [req writeToFile:DH_REQUEST_PATH atomically:YES];
     } @catch (__unused NSException *e) {
@@ -169,5 +170,55 @@ void DHFetchLatestRelease(void (^completion)(NSDictionary *_Nullable, NSError *_
             }
         }
         dispatch_async(dispatch_get_main_queue(), ^{ completion(info, err); });
+    }] resume];
+}
+
+#pragma mark - 历史版本
+
+#define DH_RELEASES_API @"https://api.github.com/repos/decrypthub/IOSDecryptHub/releases?per_page=30"
+
+void DHFetchReleases(void (^completion)(NSArray<NSDictionary *> *_Nullable, NSError *_Nullable)) {
+    NSURL *url = [NSURL URLWithString:DH_RELEASES_API];
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    cfg.timeoutIntervalForRequest = 20;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    [[session dataTaskWithURL:url completionHandler:^(NSData *_Nullable data,
+        __unused NSURLResponse *_Nullable response, NSError *_Nullable error) {
+        NSArray<NSDictionary *> *list = nil;
+        NSError *err = error;
+        if (!err) {
+            @try {
+                id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
+                if (!err && [json isKindOfClass:[NSArray class]]) {
+                    NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
+                    NSISO8601DateFormatter *parser = [[NSISO8601DateFormatter alloc] init];
+                    NSDateFormatter *writer = [[NSDateFormatter alloc] init];
+                    writer.dateFormat = @"yyyy-MM-dd";
+                    for (id item in (NSArray *)json) {
+                        if (![item isKindOfClass:[NSDictionary class]]) continue;
+                        NSString *tag = item[@"tag_name"];
+                        if (![tag isKindOfClass:[NSString class]] || tag.length == 0) continue;
+                        if ([item[@"draft"] boolValue]) continue;
+                        NSString *date = @"";
+                        NSString *published = item[@"published_at"];
+                        if ([published isKindOfClass:[NSString class]]) {
+                            NSDate *parsed = [parser dateFromString:published];
+                            if (parsed) date = [writer stringFromDate:parsed];
+                        }
+                        [out addObject:@{ @"tag": tag,
+                                          @"version": [tag hasPrefix:@"v"] ? [tag substringFromIndex:1] : tag,
+                                          @"date": date }];
+                    }
+                    list = out;
+                } else if (!err) {
+                    err = [NSError errorWithDomain:@"DHManager" code:-1 userInfo:
+                        @{NSLocalizedDescriptionKey: @"版本列表解析失败"}];
+                }
+            } @catch (__unused NSException *e) {
+                err = [NSError errorWithDomain:@"DHManager" code:-2 userInfo:
+                    @{NSLocalizedDescriptionKey: @"版本列表解析失败"}];
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(list, err); });
     }] resume];
 }

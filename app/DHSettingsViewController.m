@@ -7,10 +7,10 @@
 #import "DHSettingsViewController.h"
 #import "DHConfigStore.h"
 #import "dh_shared.h"
+#import "DHVersionsViewController.h"
 
 typedef NS_ENUM(NSInteger, DHSection) {
     DHSectionUpdate = 0,
-    DHSectionMaintenance,
     DHSectionAbout,
     DHSectionCount,
 };
@@ -35,7 +35,6 @@ static CGFloat dh_follow_aspect(void) {
 @property (nonatomic, assign) BOOL working;
 @property (nonatomic, strong) UIImageView *followView;
 @property (nonatomic, assign) BOOL hasUpdateRow;
-@property (nonatomic, assign) BOOL hasRecoveryRow;
 @end
 
 @implementation DHSettingsViewController
@@ -68,7 +67,6 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 
 - (void)reload {
     self.updaterState = DHReadUpdaterState();
-    self.hasRecoveryRow = [self.updaterState[@"backupAvailable"] boolValue];
     [self refreshAvailability];
     [self.tableView reloadData];
 }
@@ -92,18 +90,16 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 
 - (NSInteger)tableView:(__unused UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
-        case DHSectionUpdate:      return self.hasUpdateRow ? 2 : 1;
-        case DHSectionMaintenance: return self.hasRecoveryRow ? 1 : 0;
-        case DHSectionAbout:       return 2;   // 公众号 + 版本
+        case DHSectionUpdate: return self.hasUpdateRow ? 3 : 2;   // 检查更新 /[安装新版本]/ 历史版本
+        case DHSectionAbout:  return 2;                          // 公众号 + 版本
         default: return 0;
     }
 }
 
 - (NSString *)tableView:(__unused UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
-        case DHSectionUpdate:      return @"软件更新";
-        case DHSectionMaintenance: return self.hasRecoveryRow ? @"维护" : nil;
-        case DHSectionAbout:       return @"关于";
+        case DHSectionUpdate: return @"软件更新";
+        case DHSectionAbout:  return @"关于";
         default: return nil;
     }
 }
@@ -139,10 +135,10 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == DHSectionUpdate) {
         if (indexPath.row == 0) return [self actionCell:@"检查更新" image:nil enabled:!self.working];
-        return [self actionCell:@"安装新版本" image:nil enabled:!self.working];
-    }
-    if (indexPath.section == DHSectionMaintenance) {
-        return [self actionCell:@"恢复到上一个可用版本" image:nil enabled:!self.working];
+        if (self.hasUpdateRow && indexPath.row == 1) {
+            return [self actionCell:@"安装新版本" image:nil enabled:!self.working];
+        }
+        return [self actionCell:@"历史版本" image:nil enabled:!self.working];
     }
     if (indexPath.row == 0) {   // 公众号：整行图，点一下复制账号名
         UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"follow"];
@@ -204,10 +200,10 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (self.working) return;
     if (indexPath.section == DHSectionUpdate) {
-        if (indexPath.row == 0) [self checkUpdate]; else [self installUpdate];
-        return;
+        if (indexPath.row == 0) { [self checkUpdate]; return; }
+        if (self.hasUpdateRow && indexPath.row == 1) { [self installUpdate]; return; }
+        [self.navigationController pushViewController:[[DHVersionsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped] animated:YES];
     }
-    if (indexPath.section == DHSectionMaintenance) [self recover];
 }
 
 - (void)setWorking:(BOOL)working {
@@ -248,7 +244,7 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
         message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"安装" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-        if (DHWriteUpdateRequest(DH_REQ_INSTALL)) {
+        if (DHWriteUpdateRequest(DH_REQ_INSTALL, nil)) {
             self.hasUpdateRow = NO;
             [self.tableView reloadData];
         } else {
@@ -257,16 +253,6 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
             [fail addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
             [self presentViewController:fail animated:YES completion:nil];
         }
-    }]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)recover {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"恢复到上一个可用版本"
-        message:@"新版本若出现异常，可恢复到更新前的版本。" preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"恢复" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
-        DHWriteUpdateRequest(DH_REQ_ROLLBACK);
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }

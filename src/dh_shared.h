@@ -7,7 +7,10 @@
 //   状态: <bootstrap>/usr/lib/IOSDecryptHub/state.plist                  (daemon 写 0644，App 只读)
 //   请求: /var/mobile/Library/Preferences/com.iosdecrypthub.updater.request.plist
 //         (mobile 可写，daemon 读；launchd 用 WatchPaths 监听它；内容不可信，
-//          daemon 只取 action，下载地址一律自己重新查 GitHub 推导)
+//          daemon 只取 action 与可选的 version —— 下载地址一律自己按发布命名约定
+//          推导，绝不采用请求里的地址)
+//         action: check / install / rollback / none
+//         version: 可选，指定要安装的版本（历史版本），如 "1.25.1"
 
 #define DH_DOMAIN_LOADER  @"com.iosdecrypthub.loader"
 #define DH_KEY_BUNDLES    @"enabledBundles"

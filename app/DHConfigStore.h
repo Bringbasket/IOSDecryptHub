@@ -20,8 +20,11 @@ NSDictionary *DHReadEngineMeta(void);
 /// daemon 写的更新状态，缺失返回空字典
 NSDictionary *DHReadUpdaterState(void);
 
-/// 向 daemon 提交更新请求（check / install / rollback）；成功返回 YES
-BOOL DHWriteUpdateRequest(NSString *action);
+/// 向 daemon 提交更新请求（check / install / rollback）；version 非空时安装指定版本
+BOOL DHWriteUpdateRequest(NSString *action, NSString *_Nullable version);
+
+/// 拉取历史版本列表；回调在主线程。元素：@{@"tag": @"v1.25.1", @"version": @"1.25.1", @"date": @"2026-09-13"}
+void DHFetchReleases(void (^completion)(NSArray<NSDictionary *> *_Nullable releases, NSError *_Nullable error));
 
 /// 前台即时查询 GitHub 最新 release；回调在主线程。
 /// 成功：info = @{@"tag": @"v1.24.10", @"version": @"1.24.10"}；失败：error 非空
