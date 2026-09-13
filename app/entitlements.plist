@@ -2,7 +2,18 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- 平台化：越狱 App 才能在 <jbroot>/Applications 下正常运行 -->
     <key>platform-application</key>
     <true/>
+    <!-- 放开沙盒：App 要读越狱路径下的启用名单与更新状态（<jbroot>/usr/lib/IOSDecryptHub），
+         也要联网检查更新与历史版本。只签 platform-application 时这两件事都会被挡：
+         实测表现为"检查更新/历史版本没网"。
+         权限清单对齐设备上已验证可用的 Sileo（platform-application + no-sandbox + no-container）。 -->
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <key>com.apple.private.security.no-container</key>
+    <true/>
+    <key>com.apple.private.security.container-required</key>
+    <false/>
 </dict>
 </plist>

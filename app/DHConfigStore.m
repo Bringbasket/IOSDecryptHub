@@ -138,6 +138,28 @@ NSComparisonResult DHCompareVersions(NSString *left, NSString *right) {
     return NSOrderedSame;
 }
 
+// 必须持有 session：局部变量出作用域即释放，任务会被取消（表现为"没网"）
+static NSURLSession *dh_shared_session(void) {
+    static NSURLSession *session = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        cfg.timeoutIntervalForRequest = 20;
+        cfg.timeoutIntervalForResource = 30;
+        session = [NSURLSession sessionWithConfiguration:cfg];
+    });
+    return session;
+}
+
+// 错误信息带上域与码，便于定位（只说"没网"没法排查）
+static NSError *dh_net_error(NSError *error) {
+    if (!error) return nil;
+    NSString *text = [NSString stringWithFormat:@"%@（%@ %ld）",
+        error.localizedDescription, error.domain, (long)error.code];
+    return [NSError errorWithDomain:error.domain code:error.code
+                           userInfo:@{NSLocalizedDescriptionKey: text}];
+}
+
 void DHFetchLatestRelease(void (^completion)(NSDictionary *_Nullable, NSError *_Nullable)) {
     NSURL *url = [NSURL URLWithString:DH_GITHUB_LATEST];
     if (!url) {
@@ -145,14 +167,11 @@ void DHFetchLatestRelease(void (^completion)(NSDictionary *_Nullable, NSError *_
             [NSError errorWithDomain:@"DHManager" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"更新地址无效"}]); });
         return;
     }
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    cfg.timeoutIntervalForRequest = 20;
-    cfg.timeoutIntervalForResource = 30;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    NSURLSession *session = dh_shared_session();
     [[session dataTaskWithURL:url completionHandler:^(NSData *_Nullable data,
         __unused NSURLResponse *_Nullable response, NSError *_Nullable error) {
         NSDictionary *info = nil;
-        NSError *err = error;
+        NSError *err = dh_net_error(error);
         if (!err) {
             @try {
                 NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data
@@ -179,13 +198,11 @@ void DHFetchLatestRelease(void (^completion)(NSDictionary *_Nullable, NSError *_
 
 void DHFetchReleases(void (^completion)(NSArray<NSDictionary *> *_Nullable, NSError *_Nullable)) {
     NSURL *url = [NSURL URLWithString:DH_RELEASES_API];
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    cfg.timeoutIntervalForRequest = 20;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    NSURLSession *session = dh_shared_session();
     [[session dataTaskWithURL:url completionHandler:^(NSData *_Nullable data,
         __unused NSURLResponse *_Nullable response, NSError *_Nullable error) {
         NSArray<NSDictionary *> *list = nil;
-        NSError *err = error;
+        NSError *err = dh_net_error(error);
         if (!err) {
             @try {
                 id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
