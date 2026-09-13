@@ -212,7 +212,7 @@ Package: ${PKG_NAME}
 Name: IOSDecryptHub
 Version: ${VERSION}
 Architecture: ${ARCHITECTURE}
-Description: iOS runtime security analysis tool (dylib injection via jailbreak)
+Description: iOS 运行时安全分析工具 — 注入目标 App 后实时查看加解密明文、密钥、文件与网络行为（WebUI + MCP）
 Maintainer: IOSDecryptHub
 Author: IOSDecryptHub
 Section: Tweaks
@@ -250,7 +250,14 @@ VP
     sed "s/@VERSION@/${VERSION}/g" "$APP_INFO" \
         > "$STAGE/${PREFIX}/Applications/$APP_NAME.app/Info.plist"
     [ -f "$PREFS_ICON" ] || error "缺少 prefs/icon.png (App 图标)"
-    cp "$PREFS_ICON" "$STAGE/${PREFIX}/Applications/$APP_NAME.app/Icon.png"
+    # 桌面图标按标准三档出图：只给一张 120×120 时部分系统/缩放档位会渲染成空白
+    local APP_ICON_DIR="$STAGE/${PREFIX}/Applications/$APP_NAME.app"
+    cp "$PREFS_ICON" "$APP_ICON_DIR/Icon.png"
+    sips -z 60 60 "$PREFS_ICON" --out "$APP_ICON_DIR/Icon.png" >/dev/null 2>&1 || true
+    sips -z 120 120 "$PREFS_ICON" --out "$APP_ICON_DIR/Icon@2x.png" >/dev/null 2>&1 || true
+    sips -z 180 180 "$PREFS_ICON" --out "$APP_ICON_DIR/Icon@3x.png" >/dev/null 2>&1 || true
+    [ -f "$APP_ICON_DIR/Icon@2x.png" ] || error "App 图标生成失败"
+    [ -f "$APP_ICON_DIR/Icon@3x.png" ] || error "App 图标生成失败"
 
     cat > "$STAGE/DEBIAN/postinst" << POSTINST
 #!/bin/sh
@@ -423,6 +430,13 @@ POSTRM
         *"/Applications/$APP_NAME.app/Info.plist"*) ;;
         *) error "$VARIANT 缺少 App Info.plist" ;;
     esac
+
+    for ICON_NAME in Icon.png Icon@2x.png Icon@3x.png; do
+        case "$PACKAGE_CONTENTS" in
+            *"/Applications/$APP_NAME.app/$ICON_NAME"*) ;;
+            *) error "$VARIANT 缺少桌面图标 $ICON_NAME" ;;
+        esac
+    done
 
     case "$PACKAGE_CONTENTS" in
         *"/usr/lib/IOSDecryptHub/$DAEMON_BIN"*) ;;
