@@ -61,7 +61,7 @@ LOADER_SRC="$SCRIPT_DIR/src/loader.m"
 PREFS_SRC="$SCRIPT_DIR/prefs/IOSDecryptHubPrefsListController.m"
 PREFS_ICON="$SCRIPT_DIR/prefs/icon.png"
 WECHAT_PNG="$SCRIPT_DIR/prefs/wechat-follow.png"
-APP_SRCS="$SCRIPT_DIR/app/DHManagerAppDelegate.m $SCRIPT_DIR/app/DHRootViewController.m $SCRIPT_DIR/app/DHConfigStore.m $SCRIPT_DIR/app/DHAppEnumerator.m"
+APP_SRCS="$SCRIPT_DIR/app/DHManagerAppDelegate.m $SCRIPT_DIR/app/DHRootViewController.m $SCRIPT_DIR/app/DHSettingsViewController.m $SCRIPT_DIR/app/DHConfigStore.m $SCRIPT_DIR/app/DHAppEnumerator.m"
 APP_INFO="$SCRIPT_DIR/app/Info.plist"
 APP_ENTITLEMENTS="$SCRIPT_DIR/app/entitlements.plist"
 DAEMON_SRC="$SCRIPT_DIR/daemon/main.m"
@@ -124,7 +124,7 @@ compile_app() {
     $CC "${ARCH_FLAGS[@]}" -isysroot "$SDK" -miphoneos-version-min=14.0 \
         -ObjC -fobjc-arc -Wall -O2 \
         -I"$SCRIPT_DIR/src" \
-        -framework Foundation -framework UIKit \
+        -framework Foundation -framework UIKit -framework CoreGraphics \
         $APP_SRCS -o "$OUT"
 }
 
@@ -252,6 +252,8 @@ VP
     [ -f "$PREFS_ICON" ] || error "缺少 prefs/icon.png (App 图标)"
     # 桌面图标按标准三档出图：只给一张 120×120 时部分系统/缩放档位会渲染成空白
     local APP_ICON_DIR="$STAGE/${PREFIX}/Applications/$APP_NAME.app"
+    [ -f "$WECHAT_PNG" ] || error "缺少 prefs/wechat-follow.png（App 里的公众号引导）"
+    cp "$WECHAT_PNG" "$APP_ICON_DIR/wechat-follow.png"
     cp "$PREFS_ICON" "$APP_ICON_DIR/Icon.png"
     sips -z 60 60 "$PREFS_ICON" --out "$APP_ICON_DIR/Icon.png" >/dev/null 2>&1 || true
     sips -z 120 120 "$PREFS_ICON" --out "$APP_ICON_DIR/Icon@2x.png" >/dev/null 2>&1 || true
@@ -433,6 +435,11 @@ POSTRM
     case "$PACKAGE_CONTENTS" in
         *"/Applications/$APP_NAME.app/Info.plist"*) ;;
         *) error "$VARIANT 缺少 App Info.plist" ;;
+    esac
+
+    case "$PACKAGE_CONTENTS" in
+        *"/Applications/$APP_NAME.app/wechat-follow.png"*) ;;
+        *) error "$VARIANT 缺少 App 内公众号引导图" ;;
     esac
 
     for ICON_NAME in Icon.png Icon@2x.png Icon@3x.png; do

@@ -1,0 +1,274 @@
+// DHSettingsViewController.m
+//
+// 软件更新按 iOS 惯例收进设置；版本号只在这里出现一次（关于）。
+// 状态行只在"有话要说"时出现：正在检查 / 已是最新 / 发现新版本 / 更新失败。
+// 恢复上一版本不是常驻功能，只在确实存在备份时作为"故障逃生门"出现。
+
+#import "DHSettingsViewController.h"
+#import "DHConfigStore.h"
+#import "dh_shared.h"
+
+typedef NS_ENUM(NSInteger, DHSection) {
+    DHSectionUpdate = 0,
+    DHSectionMaintenance,
+    DHSectionAbout,
+    DHSectionCount,
+};
+
+static NSString *const kDHWeChatAccount = @"DecryptHub";
+
+// 图比例从 bundle 里读（首次布局时 cell 还没建，不能依赖 followView）
+static CGFloat dh_follow_aspect(void) {
+    static CGFloat aspect = 0;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *path = [[NSBundle mainBundle] pathForResource:@"wechat-follow" ofType:@"png"];
+        UIImage *image = path.length ? [UIImage imageWithContentsOfFile:path] : nil;
+        aspect = (image.size.width > 0) ? image.size.height / image.size.width : 0.308;
+    });
+    return aspect;
+}
+
+@interface DHSettingsViewController ()
+@property (nonatomic, copy) NSDictionary *updaterState;
+@property (nonatomic, copy, nullable) NSString *latestVersion;   // 仅"发现新版本"时用于展示
+@property (nonatomic, assign) BOOL working;
+@property (nonatomic, strong) UIImageView *followView;
+@property (nonatomic, assign) BOOL hasUpdateRow;
+@property (nonatomic, assign) BOOL hasRecoveryRow;
+@end
+
+@implementation DHSettingsViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"设置";
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge const void *)self, dh_settings_state_changed,
+        (__bridge CFStringRef)DH_NOTIFY_STATE, NULL,
+        CFNotificationSuspensionBehaviorDeliverImmediately);
+}
+
+static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
+    __unused void *observer, __unused CFStringRef name,
+    __unused const void *object, __unused CFDictionaryRef info) {
+    DHSettingsViewController *vc = (__bridge DHSettingsViewController *)observer;
+    dispatch_async(dispatch_get_main_queue(), ^{ [vc reload]; });
+}
+
+- (void)dealloc {
+    CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge const void *)self, (__bridge CFStringRef)DH_NOTIFY_STATE, NULL);
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reload];
+}
+
+- (void)reload {
+    self.updaterState = DHReadUpdaterState();
+    self.hasRecoveryRow = [self.updaterState[@"backupAvailable"] boolValue];
+    [self refreshAvailability];
+    [self.tableView reloadData];
+}
+
+- (void)refreshAvailability {
+    NSString *installed = DHReadEngineMeta()[@"version"];
+    NSString *latest = self.latestVersion ?: [self.updaterState[@"latestVersion"] stringByTrimmingCharactersInSet:
+        [NSCharacterSet characterSetWithCharactersInString:@"vV"]];
+    BOOL found = NO;
+    if ([installed isKindOfClass:[NSString class]] && installed.length &&
+        [latest isKindOfClass:[NSString class]] && latest.length) {
+        found = DHCompareVersions(installed, latest) == NSOrderedAscending;
+    }
+    self.latestVersion = found ? latest : nil;
+    self.hasUpdateRow = found;
+}
+
+#pragma mark - 表格
+
+- (NSInteger)numberOfSectionsInTableView:(__unused UITableView *)tableView { return DHSectionCount; }
+
+- (NSInteger)tableView:(__unused UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    switch (section) {
+        case DHSectionUpdate:      return self.hasUpdateRow ? 2 : 1;
+        case DHSectionMaintenance: return self.hasRecoveryRow ? 1 : 0;
+        case DHSectionAbout:       return 2;   // 公众号 + 版本
+        default: return 0;
+    }
+}
+
+- (NSString *)tableView:(__unused UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    switch (section) {
+        case DHSectionUpdate:      return @"软件更新";
+        case DHSectionMaintenance: return self.hasRecoveryRow ? @"维护" : nil;
+        case DHSectionAbout:       return @"关于";
+        default: return nil;
+    }
+}
+
+- (NSString *)tableView:(__unused UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    if (section != DHSectionUpdate) return nil;
+    NSDictionary *last = self.updaterState[@"lastOp"];
+    NSString *result = [last isKindOfClass:[NSDictionary class]] ? last[@"result"] : nil;
+    if ([result isEqualToString:@"error"]) {
+        NSString *reason = last[@"error"];
+        return [reason isKindOfClass:[NSString class]] && reason.length
+            ? [NSString stringWithFormat:@"上次更新失败：%@（已保留原版本）", reason]
+            : @"上次更新失败，已保留原版本。";
+    }
+    if (self.working) return @"正在检查更新…";
+    return nil;
+}
+
+- (UITableViewCell *)actionCell:(NSString *)title image:(nullable NSString *)systemImage enabled:(BOOL)enabled {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.textLabel.text = title;
+    cell.textLabel.textColor = enabled ? self.view.tintColor : [UIColor secondaryLabelColor];
+    cell.textLabel.textAlignment = NSTextAlignmentCenter;
+    cell.selectionStyle = enabled ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
+    if (systemImage) {
+        cell.imageView.image = [UIImage systemImageNamed:systemImage];
+        cell.textLabel.textAlignment = NSTextAlignmentLeft;
+    }
+    cell.userInteractionEnabled = enabled;
+    return cell;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == DHSectionUpdate) {
+        if (indexPath.row == 0) return [self actionCell:@"检查更新" image:nil enabled:!self.working];
+        return [self actionCell:@"安装新版本" image:nil enabled:!self.working];
+    }
+    if (indexPath.section == DHSectionMaintenance) {
+        return [self actionCell:@"恢复到上一个可用版本" image:nil enabled:!self.working];
+    }
+    if (indexPath.row == 0) {   // 公众号：整行图，点一下复制账号名
+        UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"follow"];
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"follow"];
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            UIImageView *view = [[UIImageView alloc] init];
+            view.contentMode = UIViewContentModeScaleAspectFit;
+            view.userInteractionEnabled = YES;
+            NSString *path = [[NSBundle mainBundle] pathForResource:@"wechat-follow" ofType:@"png"];
+            if (path.length) view.image = [UIImage imageWithContentsOfFile:path];
+            [view addGestureRecognizer:[[UITapGestureRecognizer alloc]
+                initWithTarget:self action:@selector(copyAccount)]];
+            cell.contentView.clipsToBounds = YES;
+            [cell.contentView addSubview:view];
+            self.followView = view;
+        }
+        return cell;
+    }
+    NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+    cell.textLabel.text = @"版本";
+    cell.detailTextLabel.text = [version isKindOfClass:[NSString class]] ? version : @"—";
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+}
+
+- (void)tableView:(__unused UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section != DHSectionAbout || indexPath.row != 0 || !self.followView) return;
+    // 图按宽度等比铺满整行（与设置面板里的观感一致）
+    CGFloat width = CGRectGetWidth(cell.contentView.bounds);
+    CGFloat height = MIN(floor(width * dh_follow_aspect()), 240);
+    self.followView.frame = CGRectMake(0, 0, width, height);
+    cell.frame = CGRectMake(cell.frame.origin.x, cell.frame.origin.y, cell.frame.size.width,
+                            height + 8);
+}
+
+- (CGFloat)tableView:(__unused UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == DHSectionAbout && indexPath.row == 0) {
+        CGFloat width = CGRectGetWidth(self.tableView.bounds);
+        return MIN(floor(width * dh_follow_aspect()), 240) + 8;
+    }
+    return UITableViewAutomaticDimension;
+}
+
+- (void)copyAccount {
+    [UIPasteboard generalPasteboard].string = kDHWeChatAccount;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil
+        message:@"已复制公众号名称，微信里搜一搜即可关注。"
+        preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:alert animated:YES completion:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ [alert dismissViewControllerAnimated:YES completion:nil]; });
+}
+
+#pragma mark - 动作
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (self.working) return;
+    if (indexPath.section == DHSectionUpdate) {
+        if (indexPath.row == 0) [self checkUpdate]; else [self installUpdate];
+        return;
+    }
+    if (indexPath.section == DHSectionMaintenance) [self recover];
+}
+
+- (void)setWorking:(BOOL)working {
+    _working = working;
+    [self.tableView reloadData];
+}
+
+- (void)checkUpdate {
+    [self setWorking:YES];
+    DHFetchLatestRelease(^(NSDictionary *_Nullable info, NSError *_Nullable error) {
+        [self setWorking:NO];
+        self.latestVersion = nil;
+        [self reload];
+        if (error) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"检查失败"
+                message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        [self refreshAvailability];
+        [self.tableView reloadData];
+        if (!self.hasUpdateRow) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已是最新"
+                message:nil preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+    });
+}
+
+- (void)installUpdate {
+    NSString *version = self.latestVersion ?: @"";
+    NSString *message = version.length
+        ? [NSString stringWithFormat:@"将在后台安装 %@。已启用的 App 会被自动重启，无需手动操作。", version]
+        : @"将在后台安装新版本。已启用的 App 会被自动重启，无需手动操作。";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"安装新版本"
+        message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"安装" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+        if (DHWriteUpdateRequest(DH_REQ_INSTALL)) {
+            self.hasUpdateRow = NO;
+            [self.tableView reloadData];
+        } else {
+            UIAlertController *fail = [UIAlertController alertControllerWithTitle:@"提交失败"
+                message:@"请确认插件已正确安装。" preferredStyle:UIAlertControllerStyleAlert];
+            [fail addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:fail animated:YES completion:nil];
+        }
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)recover {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"恢复到上一个可用版本"
+        message:@"新版本若出现异常，可恢复到更新前的版本。" preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"恢复" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+        DHWriteUpdateRequest(DH_REQ_ROLLBACK);
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+@end
