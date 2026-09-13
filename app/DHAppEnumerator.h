@@ -16,7 +16,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// 已安装的用户 App（按显示名排序，已过滤系统 App）：先走 LaunchServices，失败兜底扫容器目录
 NSArray<DHAppInfo *> *DHInstalledApps(void);
 
-/// 单个 App 的图标：先取系统图标缓存，再退回读 bundle 内的图标文件；都可能失败时返回 nil
+/// 单个 App 的原始图标：先取系统图标缓存，再退回读 bundle 内的图标文件；都可能失败时返回 nil
 UIImage *_Nullable DHAppIcon(NSString *bundleID, NSString *_Nullable bundlePath);
+
+/// 列表用图标：圆角（R 角）、固定尺寸、带缓存；取不到图标时返回"首字母"默认图标，绝不空着
+UIImage *DHAppListIcon(NSString *bundleID, NSString *_Nullable bundlePath, NSString *_Nullable displayName);
+
+/// 分组用索引字母：中文按拼音首字母（如 微信 → W），非字母归到 "#"
+NSString *DHAppIndexLetter(NSString *displayName);
 
 NS_ASSUME_NONNULL_END

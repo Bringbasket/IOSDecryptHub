@@ -56,6 +56,37 @@ static NSDictionary<NSString *, id> *dh_collect(void) {
         apps = [NSMutableDictionary dictionary];
     }
 
+    // 越狱安装的 App（Dopamine、Sileo 等）不在 /var/containers 里，而在 <jbroot>/Applications。
+    // 不扫这里就会出现"图标不显示"（bundle 路径取不到）。
+    {
+        const char *home = getenv("HOME");
+        (void)home;
+        NSMutableArray<NSString *> *jbDirs = [NSMutableArray array];
+        // 从主可执行文件路径反推越狱根（App 在 <jbroot>/Applications/*.app/…）
+        Dl_info info = {0};
+        if (dladdr((const void *)&dh_collect, &info) != 0 && info.dli_fname) {
+            NSString *path = [NSString stringWithUTF8String:info.dli_fname];
+            for (int i = 0; i < 3; i++) path = [path stringByDeletingLastPathComponent];
+            if (path.length > 1) [jbDirs addObject:[path stringByAppendingPathComponent:@"Applications"]];
+        }
+        [jbDirs addObject:@"/var/jb/Applications"];
+        [jbDirs addObject:@"/Applications"];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        for (NSString *dir in jbDirs) {
+            for (NSString *entry in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+                if (![entry.pathExtension.lowercaseString isEqualToString:@"app"]) continue;
+                NSString *appPath = [dir stringByAppendingPathComponent:entry];
+                NSDictionary *info2 = [NSDictionary dictionaryWithContentsOfFile:
+                    [appPath stringByAppendingPathComponent:@"Info.plist"]];
+                NSString *bundleID = info2[@"CFBundleIdentifier"];
+                if (bundleID.length == 0 || [bundleID hasPrefix:@"com.apple."]) continue;
+                if (apps[bundleID]) continue;   // LaunchServices 已给出更完整的名字
+                NSString *name = info2[@"CFBundleDisplayName"] ?: info2[@"CFBundleName"];
+                apps[bundleID] = @{ @"name": name.length ? name : bundleID, @"path": appPath };
+            }
+        }
+    }
+
     if (apps.count == 0) {  // 兜底：直接扫容器目录（LaunchServices 不可用时）
         NSFileManager *fm = [NSFileManager defaultManager];
         NSArray<NSString *> *containers =
@@ -139,4 +170,76 @@ UIImage *DHAppIcon(NSString *bundleID, NSString *_Nullable bundlePath) {
     }
     if (icon) cache[bundleID] = icon;
     return icon;
+}
+
+#pragma mark - 列表外观
+
+// iOS 图标的连续圆角近似为边长的 22.37%
+static CGFloat dh_corner_radius(CGFloat size) { return size * 0.2237; }
+
+static UIImage *dh_letter_icon(NSString *displayName, CGFloat size) {
+    NSString *letter = @"?";
+    for (NSUInteger i = 0; i < displayName.length; i++) {
+        unichar c = [displayName characterAtIndex:i];
+        if ([[NSCharacterSet alphanumericCharacterSet] characterIsMember:c]) {
+            letter = [[NSString stringWithFormat:@"%C", c] uppercaseString];
+            break;
+        }
+    }
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc]
+        initWithSize:CGSizeMake(size, size)];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        const CGFloat radius = dh_corner_radius(size);
+        [[UIColor tertiarySystemFillColor] setFill];
+        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, size, size) cornerRadius:radius] fill];
+        NSDictionary *attrs = @{
+            NSFontAttributeName: [UIFont systemFontOfSize:size * 0.44 weight:UIFontWeightSemibold],
+            NSForegroundColorAttributeName: [UIColor secondaryLabelColor],
+        };
+        CGSize textSize = [letter sizeWithAttributes:attrs];
+        [letter drawAtPoint:CGPointMake((size - textSize.width) / 2, (size - textSize.height) / 2)
+             withAttributes:attrs];
+    }];
+}
+
+UIImage *DHAppListIcon(NSString *bundleID, NSString *_Nullable bundlePath, NSString *_Nullable displayName) {
+    static NSMutableDictionary<NSString *, UIImage *> *cache = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+
+    const CGFloat size = 40;
+    NSString *key = [NSString stringWithFormat:@"%.0f|%@|%@", size, bundleID, displayName];
+    if (cache[key]) return cache[key];
+
+    UIImage *raw = DHAppIcon(bundleID, bundlePath);
+    UIImage *out = nil;
+    if (raw) {
+        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc]
+            initWithSize:CGSizeMake(size, size)];
+        out = [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+            [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, size, size)
+                                       cornerRadius:dh_corner_radius(size)] addClip];
+            [raw drawInRect:CGRectMake(0, 0, size, size)];
+        }];
+    } else {
+        // 取不到图标也要有东西，不留空
+        out = dh_letter_icon(displayName.length ? displayName : bundleID, size);
+    }
+    if (out) cache[key] = out;
+    return out;
+}
+
+NSString *DHAppIndexLetter(NSString *displayName) {
+    if (displayName.length == 0) return @"#";
+    NSMutableString *text = [displayName mutableCopy];
+    // 中文取拼音首字母（微信 → weixin → W）
+    CFStringTransform((__bridge CFMutableStringRef)text, NULL, kCFStringTransformToLatin, false);
+    CFStringTransform((__bridge CFMutableStringRef)text, NULL, kCFStringTransformStripDiacritics, false);
+    for (NSUInteger i = 0; i < text.length; i++) {
+        unichar c = [text characterAtIndex:i];
+        if (c >= 'a' && c <= 'z') return [[NSString stringWithFormat:@"%C", c] uppercaseString];
+        if (c >= 'A' && c <= 'Z') return [NSString stringWithFormat:@"%C", c];
+        if (c >= '0' && c <= '9') return @"#";
+    }
+    return @"#";
 }
