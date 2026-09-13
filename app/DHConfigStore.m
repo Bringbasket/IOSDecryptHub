@@ -206,6 +206,20 @@ BOOL DHWriteRestartRequest(NSString *bundleID) {
     }
 }
 
+BOOL DHWriteStopRequest(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+    NSDictionary *req = @{
+        @"action": DH_REQ_STOP,
+        @"bundle": bundleID,
+        @"time": @([[NSDate date] timeIntervalSince1970]),
+    };
+    @try {
+        return [req writeToFile:DH_REQUEST_PATH atomically:YES];
+    } @catch (__unused NSException *e) {
+        return NO;
+    }
+}
+
 #pragma mark - 历史版本
 
 #define DH_RELEASES_API @"https://api.github.com/repos/decrypthub/IOSDecryptHub/releases?per_page=30"

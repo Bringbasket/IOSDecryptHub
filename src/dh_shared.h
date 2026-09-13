@@ -9,8 +9,10 @@
 //         (mobile 可写，daemon 读；launchd 用 WatchPaths 监听它；内容不可信，
 //          daemon 只取 action 与可选的 version —— 下载地址一律自己按发布命名约定
 //          推导，绝不采用请求里的地址)
-//         action: check / install / rollback / none
+//         action: check / install / rollback / restart / stop / none
 //         version: 可选，指定要安装的版本（历史版本），如 "1.25.1"
+//         bundle:  可选，restart / stop 要操作的 App（bundle id）
+//                  restart = 结束进程并尽量重新打开；stop = 只结束进程
 
 #define DH_DOMAIN_LOADER  @"com.iosdecrypthub.loader"
 #define DH_KEY_BUNDLES    @"enabledBundles"
@@ -36,4 +38,6 @@
 #define DH_REQ_CHECK      @"check"
 #define DH_REQ_INSTALL    @"install"
 #define DH_REQ_ROLLBACK   @"rollback"
+#define DH_REQ_RESTART    @"restart"
+#define DH_REQ_STOP       @"stop"
 #define DH_REQ_NONE       @"none"

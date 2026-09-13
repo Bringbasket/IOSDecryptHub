@@ -484,6 +484,35 @@ static BOOL dh_relaunch_app(NSString *bundleID) {
     return YES;
 }
 
+// 只结束进程、不重新打开（用户在卡片菜单里主动选择"停止"）
+static void dh_do_stop(NSString *bundleID) {
+    if (bundleID.length == 0) {
+        dh_record_op(@"stop", nil, @"error", @"请求里没有 bundle", nil);
+        return;
+    }
+    NSString *execName = dh_executable_map()[bundleID];
+    if (execName.length == 0) {
+        dh_record_op(@"stop", nil, @"error", @"找不到该 App 的可执行文件", nil);
+        return;
+    }
+    NSArray<NSString *> *killed = dh_kill_processes_named([NSSet setWithObject:execName]);
+
+    NSMutableDictionary *op = [NSMutableDictionary dictionary];
+    op[@"kind"] = @"stop";
+    op[@"time"] = @([[NSDate date] timeIntervalSince1970]);
+    op[@"bundle"] = bundleID;
+    if (killed.count > 0) {
+        op[@"result"] = @"ok";
+        op[@"restartedApps"] = killed;
+    } else {
+        op[@"result"] = @"skipped";
+        op[@"error"] = @"该 App 当前没有在运行";
+    }
+    g_state[@"lastOp"] = op;
+    dh_state_save();
+    dh_log("停止 %s：结束 %lu 个进程", bundleID.UTF8String, (unsigned long)killed.count);
+}
+
 static void dh_do_restart(NSString *bundleID) {
     if (bundleID.length == 0) {
         dh_record_op(@"restart", nil, @"error", @"请求里没有 bundle", nil);
@@ -753,6 +782,9 @@ static void dh_process_request(void) {
     } else if ([action isEqualToString:DH_REQ_RESTART]) {
         id bundle = req[@"bundle"];
         dh_do_restart([bundle isKindOfClass:[NSString class]] ? bundle : nil);
+    } else if ([action isEqualToString:DH_REQ_STOP]) {
+        id bundle = req[@"bundle"];
+        dh_do_stop([bundle isKindOfClass:[NSString class]] ? bundle : nil);
     } else {
         dh_log("未知请求: %s，已忽略", action.UTF8String);
     }

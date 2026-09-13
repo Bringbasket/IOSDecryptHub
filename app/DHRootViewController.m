@@ -28,9 +28,6 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 @property (nonatomic, assign) BOOL searching;
 @property (nonatomic, assign) BOOL enabledOnly;
 @property (nonatomic, strong) NSMutableArray<NSString *> *pendingRestart;   // 改了开关但还没重启的 App
-@property (nonatomic, strong) UIView *restartBanner;
-@property (nonatomic, strong) UILabel *restartBannerLabel;
-@property (nonatomic, strong) UIButton *restartBannerButton;
 @end
 
 @implementation DHRootViewController
@@ -161,7 +158,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 - (NSString *)tableView:(__unused UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     // 只留一句真正需要用户做动作的话，放在"已启用"页（管理开关的地方）
     if (!self.searching && self.enabledOnly && section == 0) {
-        return @"改动需要重启目标 App 才生效。";
+        return @"改动需要重启目标 App 才生效；点右侧 ⋯ 可重启或停止。";
     }
     return nil;
 }
@@ -196,46 +193,196 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"app"];
     if (!cell) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"app"];
-        UISwitch *toggle = [[UISwitch alloc] init];
-        [toggle addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = toggle;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
         cell.detailTextLabel.font = [UIFont systemFontOfSize:11];
+
+        // 附件区：⋯ 菜单 + 开关。⋯ 是可见入口（左滑/长按用户未必发现），
+        // 里面按当前状态给"重启 / 停止"或"开启注入"。
+        UIView *accessory = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 92, 32)];
+        UIButton *more = [UIButton buttonWithType:UIButtonTypeSystem];
+        more.frame = CGRectMake(0, 1, 30, 30);
+        [more setImage:[UIImage systemImageNamed:@"ellipsis.circle"] forState:UIControlStateNormal];
+        more.showsMenuAsPrimaryAction = YES;          // iOS 14+
+        [accessory addSubview:more];
+        UISwitch *toggle = [[UISwitch alloc] init];
+        toggle.frame = CGRectMake(38, 0, 51, 31);
+        [toggle addTarget:self action:@selector(toggleChanged:) forControlEvents:UIControlEventValueChanged];
+        [accessory addSubview:toggle];
+        cell.accessoryView = accessory;
     }
+    UIView *accessory = cell.accessoryView;
+    UIButton *more = (UIButton *)accessory.subviews.firstObject;
+    UISwitch *toggle = (UISwitch *)accessory.subviews.lastObject;
+    more.menu = [self menuForApp:app];               // 每次重建：菜单内容跟着状态走
+
     cell.textLabel.text = app.name;
-    cell.detailTextLabel.text = app.bundleID;
+    if ([self.pendingRestart containsObject:app.bundleID]) {
+        // 改了开关还没重启：直接标在这一行上，比横幅更贴身
+        NSMutableAttributedString *subtitle = [[NSMutableAttributedString alloc]
+            initWithString:app.bundleID
+                attributes:@{ NSForegroundColorAttributeName: [UIColor secondaryLabelColor] }];
+        [subtitle appendAttributedString:[[NSAttributedString alloc]
+            initWithString:@"　需重启"
+                attributes:@{ NSForegroundColorAttributeName: [UIColor systemOrangeColor] }]];
+        cell.detailTextLabel.attributedText = subtitle;
+    } else {
+        cell.detailTextLabel.attributedText = nil;
+        cell.detailTextLabel.text = app.bundleID;
+    }
     cell.imageView.image = DHAppListIcon(app.bundleID, app.bundlePath, app.name);
-    UISwitch *toggle = (UISwitch *)cell.accessoryView;
     toggle.on = [self.enabled containsObject:app.bundleID];
     toggle.tag = indexPath.section * 10000 + indexPath.row;
     return cell;
 }
 
-#pragma mark - 左滑重启
+#pragma mark - 开关
 
-- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
-    trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+- (void)toggleChanged:(UISwitch *)toggle {
+    NSInteger section = toggle.tag / 10000;
+    NSInteger row = toggle.tag % 10000;
+    if (section >= (NSInteger)self.sections.count) return;
+    NSArray<DHAppInfo *> *apps = self.sections[section];
+    if (row < 0 || row >= (NSInteger)apps.count) return;
+    [self applyEnabled:toggle.on forApp:apps[row] revert:(void (^)(void))^{
+        toggle.on = !toggle.on;
+    }];
+}
+
+#pragma mark - 每行的 ⋯ 菜单（与长按菜单同一份内容）
+
+- (UIMenu *)menuForApp:(DHAppInfo *)app {
+    BOOL on = [self.enabled containsObject:app.bundleID];
+    __weak typeof(self) weakSelf = self;
+    NSMutableArray<UIMenuElement *> *items = [NSMutableArray array];
+    if (on) {
+        [items addObject:[UIAction actionWithTitle:@"重启" image:[UIImage systemImageNamed:@"arrow.clockwise"]
+                                        identifier:nil handler:^(__unused UIAction *a) {
+            [weakSelf requestRestartFor:app.bundleID];
+        }]];
+        [items addObject:[UIAction actionWithTitle:@"停止" image:[UIImage systemImageNamed:@"stop.circle"]
+                                        identifier:nil handler:^(__unused UIAction *a) {
+            [weakSelf requestStopFor:app.bundleID];
+        }]];
+    } else {
+        [items addObject:[UIAction actionWithTitle:@"开启注入" image:[UIImage systemImageNamed:@"checkmark.circle"]
+                                        identifier:nil handler:^(__unused UIAction *a) {
+            [weakSelf applyEnabled:YES forApp:app revert:nil];
+        }]];
+    }
+    return [UIMenu menuWithChildren:items];
+}
+
+- (UIContextMenuConfiguration *)tableView:(__unused UITableView *)tableView
+    contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath
+                                        point:(__unused CGPoint)point {
     if (self.sections.count == 0 || indexPath.section >= (NSInteger)self.sections.count) return nil;
     NSArray<DHAppInfo *> *apps = self.sections[indexPath.section];
     if (indexPath.row >= (NSInteger)apps.count) return nil;
     DHAppInfo *app = apps[indexPath.row];
-    if (![self.enabled containsObject:app.bundleID]) return nil;   // 没启用就没什么可生效的
-
-    __weak typeof(self) weakSelf = self;
-    UIContextualAction *restart = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
-                                                                          title:@"重启"
-                                                                        handler:^(__unused UIContextualAction *action,
-                                                                                  __unused UIView *source,
-                                                                                  void (^completion)(BOOL)) {
-        completion(DHWriteRestartRequest(app.bundleID));
-        [weakSelf watchRestartResultFor:app.bundleID];
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil
+        actionProvider:^(__unused NSArray<UIMenuElement *> *suggested) {
+        return [self menuForApp:app];
     }];
-    restart.backgroundColor = self.view.tintColor;
-    return [UISwipeActionsConfiguration configurationWithActions:@[ restart ]];
 }
 
-// 重启由 daemon 异步执行；只在"没能自动打开"这类需要用户接手的情况下提示一句。
+- (void)requestRestartFor:(NSString *)bundleID {
+    if (!DHWriteRestartRequest(bundleID)) return;
+    [self clearPendingRestart:bundleID];
+    [self watchRestartResultFor:bundleID tellOnSuccess:YES];
+}
+
+- (void)requestStopFor:(NSString *)bundleID {
+    if (!DHWriteStopRequest(bundleID)) return;
+    [self clearPendingRestart:bundleID];
+}
+
+#pragma mark - 开关写入
+
+- (void)applyEnabled:(BOOL)on forApp:(DHAppInfo *)app revert:(void (^)(void))revert {
+    NSMutableSet<NSString *> *next = [self.enabled mutableCopy];
+    if (on) [next addObject:app.bundleID]; else [next removeObject:app.bundleID];
+    if (!DHWriteEnabledBundles(next)) {
+        if (revert) revert();
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存失败"
+            message:@"写入启用名单失败。请确认插件已正确安装。" preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    self.enabled = next;
+    [self rebuild];
+    [self.tableView reloadData];
+
+    // 关掉/打开都只有重启目标 App 才生效。用户不知道这一点，所以由我们来判断：
+    // 目标正在运行时自动重启它；没在运行时什么都不做（下次打开自然是新状态）。
+    // 这样批量开关多个 App 时不会弹一堆确认框。
+    // 不替用户做动作：只在列表顶部告诉他"这个改动需要重启才生效"，并给一个按钮。
+    // 目标本来就没在运行的话不用提醒 —— 下次打开自然是新状态。
+    NSString *selfBundle = [[NSBundle mainBundle] bundleIdentifier];
+    BOOL isSelf = [app.bundleID isEqualToString:selfBundle];
+    if (!isSelf && DHAppProcessRunning(app)) {
+        [self markPendingRestart:app.bundleID];
+    } else {
+        [self clearPendingRestart:app.bundleID];
+    }
+}
+
+#pragma mark - 待重启（开关改了但还没生效）
+
+- (void)loadPendingRestart {
+    NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"dhPendingRestart"];
+    self.pendingRestart = [NSMutableArray array];
+    for (id item in saved) {
+        if ([item isKindOfClass:[NSString class]]) [self.pendingRestart addObject:item];
+    }
+}
+
+- (void)savePendingRestart {
+    [[NSUserDefaults standardUserDefaults] setObject:[self.pendingRestart copy] forKey:@"dhPendingRestart"];
+}
+
+- (void)markPendingRestart:(NSString *)bundleID {
+    if (bundleID.length == 0) return;
+    if (![self.pendingRestart containsObject:bundleID]) {
+        [self.pendingRestart addObject:bundleID];
+        [self savePendingRestart];
+    }
+    [self.tableView reloadData];
+}
+
+- (void)clearPendingRestart:(NSString *)bundleID {
+    if ([self.pendingRestart containsObject:bundleID]) {
+        [self.pendingRestart removeObject:bundleID];
+        [self savePendingRestart];
+        [self.tableView reloadData];
+    }
+}
+
+// 每次进入界面时清理：已经不在运行的 App 不用再提醒（下次打开自然是新状态）
+- (void)prunePendingRestart {
+    NSMutableDictionary<NSString *, DHAppInfo *> *map = [NSMutableDictionary dictionary];
+    for (DHAppInfo *app in self.allApps) map[app.bundleID] = app;
+    BOOL changed = NO;
+    for (NSString *bundleID in [self.pendingRestart copy]) {
+        DHAppInfo *app = map[bundleID];
+        if (!app || !DHAppProcessRunning(app)) {
+            [self.pendingRestart removeObject:bundleID];
+            changed = YES;
+        }
+    }
+    if (changed) [self savePendingRestart];
+}
+
+- (NSString *)displayNameForBundle:(NSString *)bundleID {
+    for (DHAppInfo *app in self.allApps) {
+        if ([app.bundleID isEqualToString:bundleID]) return app.name;
+    }
+    return bundleID;
+}
+
+#pragma mark - 重启结果
+
 - (void)watchRestartResultFor:(NSString *)bundleID {
     [self watchRestartResultFor:bundleID tellOnSuccess:NO];
 }
@@ -277,155 +424,6 @@ typedef NS_ENUM(NSInteger, DHFilter) {
             [self presentViewController:alert animated:YES completion:nil];
         });
         return;
-    }
-}
-
-#pragma mark - 开关
-
-- (void)toggleChanged:(UISwitch *)toggle {
-    NSInteger section = toggle.tag / 10000;
-    NSInteger row = toggle.tag % 10000;
-    if (section >= (NSInteger)self.sections.count) return;
-    NSArray<DHAppInfo *> *apps = self.sections[section];
-    if (row < 0 || row >= (NSInteger)apps.count) return;
-    DHAppInfo *app = apps[row];
-
-    NSMutableSet<NSString *> *next = [self.enabled mutableCopy];
-    if (toggle.on) [next addObject:app.bundleID]; else [next removeObject:app.bundleID];
-    if (!DHWriteEnabledBundles(next)) {
-        toggle.on = !toggle.on;
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存失败"
-            message:@"写入启用名单失败。请确认插件已正确安装。" preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
-        return;
-    }
-    self.enabled = next;
-    [self rebuild];
-    [self.tableView reloadData];
-
-    // 关掉/打开都只有重启目标 App 才生效。用户不知道这一点，所以由我们来判断：
-    // 目标正在运行时自动重启它；没在运行时什么都不做（下次打开自然是新状态）。
-    // 这样批量开关多个 App 时不会弹一堆确认框。
-    // 不替用户做动作：只在列表顶部告诉他"这个改动需要重启才生效"，并给一个按钮。
-    // 目标本来就没在运行的话不用提醒 —— 下次打开自然是新状态。
-    NSString *selfBundle = [[NSBundle mainBundle] bundleIdentifier];
-    BOOL isSelf = [app.bundleID isEqualToString:selfBundle];
-    if (!isSelf && DHAppProcessRunning(app)) {
-        [self markPendingRestart:app.bundleID];
-    } else {
-        [self clearPendingRestart:app.bundleID];
-    }
-}
-
-#pragma mark - 待重启横幅
-
-- (void)loadPendingRestart {
-    NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"dhPendingRestart"];
-    self.pendingRestart = [NSMutableArray array];
-    for (id item in saved) {
-        if ([item isKindOfClass:[NSString class]]) [self.pendingRestart addObject:item];
-    }
-}
-
-- (void)savePendingRestart {
-    [[NSUserDefaults standardUserDefaults] setObject:[self.pendingRestart copy] forKey:@"dhPendingRestart"];
-}
-
-- (void)markPendingRestart:(NSString *)bundleID {
-    if (bundleID.length == 0) return;
-    if (![self.pendingRestart containsObject:bundleID]) {
-        [self.pendingRestart addObject:bundleID];
-        [self savePendingRestart];
-    }
-    [self refreshRestartBanner];
-}
-
-- (void)clearPendingRestart:(NSString *)bundleID {
-    if ([self.pendingRestart containsObject:bundleID]) {
-        [self.pendingRestart removeObject:bundleID];
-        [self savePendingRestart];
-        [self refreshRestartBanner];
-    }
-}
-
-// 每次进入界面时清理：已经不在运行的 App 不用再提醒（下次打开自然是新状态）
-- (void)prunePendingRestart {
-    NSMutableDictionary<NSString *, DHAppInfo *> *map = [NSMutableDictionary dictionary];
-    for (DHAppInfo *app in self.allApps) map[app.bundleID] = app;
-    BOOL changed = NO;
-    for (NSString *bundleID in [self.pendingRestart copy]) {
-        DHAppInfo *app = map[bundleID];
-        if (!app || !DHAppProcessRunning(app)) {
-            [self.pendingRestart removeObject:bundleID];
-            changed = YES;
-        }
-    }
-    if (changed) [self savePendingRestart];
-    [self refreshRestartBanner];
-}
-
-- (NSString *)displayNameForBundle:(NSString *)bundleID {
-    for (DHAppInfo *app in self.allApps) {
-        if ([app.bundleID isEqualToString:bundleID]) return app.name;
-    }
-    return bundleID;
-}
-
-- (void)refreshRestartBanner {
-    if (self.pendingRestart.count == 0) {
-        self.tableView.tableHeaderView = nil;
-        return;
-    }
-    if (!self.restartBanner) {
-        UIView *banner = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 56)];
-        banner.backgroundColor = [UIColor secondarySystemBackgroundColor];
-        banner.layer.cornerRadius = 10;
-        banner.layer.masksToBounds = YES;
-
-        UILabel *label = [[UILabel alloc] init];
-        label.numberOfLines = 2;
-        label.font = [UIFont systemFontOfSize:13];
-        label.textColor = [UIColor labelColor];
-        [banner addSubview:label];
-
-        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-        button.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-        [button addTarget:self action:@selector(restartPendingTapped) forControlEvents:UIControlEventTouchUpInside];
-        [banner addSubview:button];
-
-        self.restartBanner = banner;
-        self.restartBannerLabel = label;
-        self.restartBannerButton = button;
-    }
-
-    NSString *text;
-    NSString *title;
-    if (self.pendingRestart.count == 1) {
-        text = [NSString stringWithFormat:@"%@ 的改动需要重启才生效", [self displayNameForBundle:self.pendingRestart.firstObject]];
-        title = @"重启";
-    } else {
-        text = [NSString stringWithFormat:@"%lu 个 App 的改动需要重启才生效", (unsigned long)self.pendingRestart.count];
-        title = @"全部重启";
-    }
-    self.restartBannerLabel.text = text;
-    [self.restartBannerButton setTitle:title forState:UIControlStateNormal];
-
-    CGFloat width = CGRectGetWidth(self.tableView.bounds);
-    CGFloat height = 56;
-    self.restartBanner.frame = CGRectMake(0, 0, width, height);
-    CGFloat buttonWidth = 96;
-    self.restartBannerLabel.frame = CGRectMake(16, 0, width - buttonWidth - 32, height);
-    self.restartBannerButton.frame = CGRectMake(width - buttonWidth - 12, 0, buttonWidth, height);
-    self.tableView.tableHeaderView = self.restartBanner;
-}
-
-- (void)restartPendingTapped {
-    NSArray<NSString *> *targets = [self.pendingRestart copy];
-    for (NSString *bundleID in targets) {
-        if (DHWriteRestartRequest(bundleID)) {
-            [self clearPendingRestart:bundleID];
-        }
     }
 }
 

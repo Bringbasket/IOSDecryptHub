@@ -350,5 +350,23 @@ eq "$(sha "${ENGINE_DIR}/decrypt_helper.dylib")" "${ENGINE_BEFORE}" "重启不�
 kill -9 "${VICTIM_PID}" 2>/dev/null; VICTIM_PID=""
 
 echo
+echo "--- T12 停止指定 App（只结束，不重新打开）"
+reset_env "${LATEST_TAG#v}"
+mkdir -p "${APPS_DIR}/SimVictim.app"
+write_plist "${APPS_DIR}/SimVictim.app/Info.plist" \
+    '<dict><key>CFBundleIdentifier</key><string>com.sim.victim</string><key>CFBundleExecutable</key><string>DHSimVictim</string></dict>'
+VICTIM_PID=$(start_proc DHSimVictim)
+sleep 1
+kill -0 "${VICTIM_PID}" 2>/dev/null && ok "目标进程就绪" || ng "目标进程没起来"
+write_plist "${REQUEST}" "<dict><key>action</key><string>stop</string><key>bundle</key><string>com.sim.victim</string></dict>"
+"${DAEMON_KILL}"
+sleep 0.5
+kill -0 "${VICTIM_PID}" 2>/dev/null && ng "进程未被结束" || ok "进程已被结束"
+eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:kind)" "stop" "记录的动作是 stop"
+eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:result)" "ok" "结果 ok"
+eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:relaunched)" "" "stop 不写 relaunched（没重开）"
+kill -9 "${VICTIM_PID}" 2>/dev/null; VICTIM_PID=""
+
+echo
 printf 'updater 仿真结果: PASS=%d FAIL=%d\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]

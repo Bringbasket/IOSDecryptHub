@@ -23,6 +23,9 @@ NSDictionary *DHReadUpdaterState(void);
 /// 向 daemon 提交更新请求（check / install / rollback）；version 非空时安装指定版本
 BOOL DHWriteUpdateRequest(NSString *action, NSString *_Nullable version);
 
+/// 请求停止指定 App（只结束进程，不重新打开，由 daemon 执行）
+BOOL DHWriteStopRequest(NSString *bundleID);
+
 /// 请求重启指定 App（结束进程并尽量重新打开，由 daemon 执行）
 BOOL DHWriteRestartRequest(NSString *bundleID);
 
