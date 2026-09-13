@@ -319,5 +319,36 @@ else
 fi
 
 echo
+echo "--- T11 重启指定 App（结束进程 + 尝试重新打开）"
+reset_env "${LATEST_TAG#v}"
+mkdir -p "${APPS_DIR}/SimVictim.app"
+write_plist "${APPS_DIR}/SimVictim.app/Info.plist" \
+    '<dict><key>CFBundleIdentifier</key><string>com.sim.victim</string><key>CFBundleExecutable</key><string>DHSimVictim</string></dict>'
+write_plist "${ENGINE_DIR}/config/enabledBundles.plist" \
+    '<dict><key>enabledBundles</key><array><string>com.sim.victim</string></array></dict>'
+ENGINE_BEFORE=$(sha "${ENGINE_DIR}/decrypt_helper.dylib")
+
+# 负例：App 没在运行时 → skipped
+request_restart(){ write_plist "${REQUEST}" "<dict><key>action</key><string>restart</string><key>bundle</key><string>$1</string></dict>"; }
+request_restart com.sim.victim
+"${DAEMON_KILL}"
+eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:result)" "skipped" "没在运行时记为 skipped"
+eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:kind)" "restart" "记录的动作是 restart"
+
+# 正例：进程在跑 → 结束它（macOS 上没有 uiopen，relaunched 应为 false）
+VICTIM_PID=$(start_proc DHSimVictim)
+sleep 1
+kill -0 "${VICTIM_PID}" 2>/dev/null && ok "目标进程就绪" || ng "目标进程没起来"
+request_restart com.sim.victim
+"${DAEMON_KILL}"
+sleep 0.5
+kill -0 "${VICTIM_PID}" 2>/dev/null && ng "进程未被结束" || ok "进程已被结束"
+eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:result)" "ok" "结果 ok"
+eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:bundle)" "com.sim.victim" "记录了目标 bundle"
+eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:relaunched)" "false" "无 uiopen 时如实记为未自动打开"
+eq "$(sha "${ENGINE_DIR}/decrypt_helper.dylib")" "${ENGINE_BEFORE}" "重启不碰引擎"
+kill -9 "${VICTIM_PID}" 2>/dev/null; VICTIM_PID=""
+
+echo
 printf 'updater 仿真结果: PASS=%d FAIL=%d\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]

@@ -155,7 +155,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 - (NSString *)tableView:(__unused UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     // 只留一句真正需要用户做动作的话，放在"已启用"页（管理开关的地方）
     if (!self.searching && self.enabledOnly && section == 0) {
-        return @"开关改动后需完全退出并重新打开目标 App 才会生效。";
+        return @"开关改动后需重启目标 App 才生效；也可在下面的列表里左滑选择「重启」。";
     }
     return nil;
 }
@@ -204,6 +204,57 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     toggle.on = [self.enabled containsObject:app.bundleID];
     toggle.tag = indexPath.section * 10000 + indexPath.row;
     return cell;
+}
+
+#pragma mark - 左滑重启
+
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
+    trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (self.sections.count == 0 || indexPath.section >= (NSInteger)self.sections.count) return nil;
+    NSArray<DHAppInfo *> *apps = self.sections[indexPath.section];
+    if (indexPath.row >= (NSInteger)apps.count) return nil;
+    DHAppInfo *app = apps[indexPath.row];
+    if (![self.enabled containsObject:app.bundleID]) return nil;   // 没启用就没什么可生效的
+
+    __weak typeof(self) weakSelf = self;
+    UIContextualAction *restart = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                                                                          title:@"重启"
+                                                                        handler:^(__unused UIContextualAction *action,
+                                                                                  __unused UIView *source,
+                                                                                  void (^completion)(BOOL)) {
+        completion(DHWriteRestartRequest(app.bundleID));
+        [weakSelf watchRestartResultFor:app.bundleID];
+    }];
+    restart.backgroundColor = self.view.tintColor;
+    return [UISwipeActionsConfiguration configurationWithActions:@[ restart ]];
+}
+
+// 重启由 daemon 异步执行；只在"没能自动打开"这类需要用户接手的情况下提示一句。
+- (void)watchRestartResultFor:(NSString *)bundleID {
+    // 轮询必须在后台：这个方法是滑动动作直接调的，睡在主线程会把界面冻住
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        [self pollRestartResultFor:bundleID];
+    });
+}
+
+- (void)pollRestartResultFor:(NSString *)bundleID {
+    for (int i = 0; i < 12; i++) {
+        [NSThread sleepForTimeInterval:0.5];
+        NSDictionary *op = DHReadUpdaterState()[@"lastOp"];
+        if (![op isKindOfClass:[NSDictionary class]]) continue;
+        if (![op[@"bundle"] isEqualToString:bundleID]) continue;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if ([op[@"relaunched"] boolValue]) return;   // 已自动打开，不用打扰用户
+            NSString *message = [op[@"result"] isEqualToString:@"skipped"]
+                ? @"该 App 当前没有在运行。"
+                : @"已结束它，请手动打开以让改动生效。";
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil
+                message:message preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        });
+        return;
+    }
 }
 
 #pragma mark - 开关

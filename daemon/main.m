@@ -97,7 +97,9 @@ static NSString *_Nullable dh_existing_engine_dir(void) {
 static int dh_acquire_lock(void) {
     if (!g_engine_dir) return -1;
     NSString *path = [g_engine_dir stringByAppendingPathComponent:@".updated.lock"];
-    int fd = open(path.fileSystemRepresentation, O_CREAT | O_RDWR, 0644);
+    // O_CLOEXEC：下面重启 App 会 fork+exec，子进程绝不能继承这把锁，
+    // 否则它退出前后续所有 daemon 实例都会被挡在门外。
+    int fd = open(path.fileSystemRepresentation, O_CREAT | O_RDWR | O_CLOEXEC, 0644);
     if (fd < 0) return -1;
     if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
         close(fd);
@@ -459,6 +461,61 @@ static NSArray<NSString *> *dh_kill_processes_named(NSSet<NSString *> *names) {
     return killed;
 }
 
+#pragma mark - 重启指定 App
+
+// 结束目标 App 的进程，并尽量把它重新拉起来（越狱环境才能做这件事）。
+// 拉回来依赖 uiopen（uikittools）；设备上没有该工具时就只结束进程，
+// 由 App 侧如实告诉用户"需要手动点开"。
+static BOOL dh_relaunch_app(NSString *bundleID) {
+    const char *candidates[] = { "/var/jb/usr/bin/uiopen", "/usr/local/bin/uiopen",
+                                 "/usr/bin/uiopen", NULL };
+    const char *tool = NULL;
+    for (int i = 0; candidates[i]; i++) {
+        if (access(candidates[i], X_OK) == 0) { tool = candidates[i]; break; }
+    }
+    if (!tool) return NO;
+    pid_t pid = fork();
+    if (pid < 0) return NO;
+    if (pid == 0) {
+        setsid();   // 脱离会话，daemon 退出也不影响它
+        execl(tool, tool, "--bundleid", bundleID.UTF8String, (char *)NULL);
+        _exit(127);
+    }
+    return YES;
+}
+
+static void dh_do_restart(NSString *bundleID) {
+    if (bundleID.length == 0) {
+        dh_record_op(@"restart", nil, @"error", @"请求里没有 bundle", nil);
+        return;
+    }
+    NSDictionary<NSString *, NSString *> *execMap = dh_executable_map();
+    NSString *execName = execMap[bundleID];
+    if (execName.length == 0) {
+        dh_record_op(@"restart", nil, @"error", @"找不到该 App 的可执行文件", nil);
+        return;
+    }
+    NSArray<NSString *> *killed = dh_kill_processes_named([NSSet setWithObject:execName]);
+    BOOL relaunched = dh_relaunch_app(bundleID);
+
+    NSMutableDictionary *op = [NSMutableDictionary dictionary];
+    op[@"kind"] = @"restart";
+    op[@"time"] = @([[NSDate date] timeIntervalSince1970]);
+    op[@"bundle"] = bundleID;
+    op[@"relaunched"] = @(relaunched);
+    if (killed.count > 0) {
+        op[@"result"] = @"ok";
+        op[@"restartedApps"] = killed;
+    } else {
+        op[@"result"] = @"skipped";
+        op[@"error"] = @"该 App 当前没有在运行";
+    }
+    g_state[@"lastOp"] = op;
+    dh_state_save();
+    dh_log("重启 %s：结束 %lu 个进程，relaunched=%d", bundleID.UTF8String,
+           (unsigned long)killed.count, relaunched ? 1 : 0);
+}
+
 #pragma mark - 检查 / 安装 / 回滚
 
 static NSString *dh_local_version(void) {
@@ -693,6 +750,9 @@ static void dh_process_request(void) {
         dh_do_install([wantVersion isKindOfClass:[NSString class]] ? wantVersion : nil);
     } else if ([action isEqualToString:DH_REQ_ROLLBACK]) {
         dh_do_rollback();
+    } else if ([action isEqualToString:DH_REQ_RESTART]) {
+        id bundle = req[@"bundle"];
+        dh_do_restart([bundle isKindOfClass:[NSString class]] ? bundle : nil);
     } else {
         dh_log("未知请求: %s，已忽略", action.UTF8String);
     }

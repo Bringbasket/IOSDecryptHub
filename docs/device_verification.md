@@ -70,7 +70,19 @@
    `decrypt_helper.dylib.bak` 是切换前那一版
 5. **断网后点安装** → 应记为失败且**引擎文件完全不动**（这是"不许把引擎搞没"的底线证据）
 
-## 7. 注入链路（越狱加载器 → 引擎）
+## 7. 重启指定 App（越狱环境下替用户完成"退出再打开"）
+
+1. 在 App 的「已启用」列表里左滑某一行 → 出现「重启」
+2. 点击后观察：
+   - 目标 App 的进程被结束（`ps -A | grep <可执行名>` 数量归零）
+   - 设备上若装了 uiopen（uikittools），应被自动重新打开；`state.plist` 的
+     `lastOp.relaunched` 为 true
+   - 日志有 `重启 <bundle>：结束 N 个进程，relaunched=1`
+3. 目标 App 本就没在运行时：`lastOp.result` 应为 `skipped` 且带原因（不该假装成功）
+
+> 没有 uiopen 的环境只结束进程，App 会提示"请手动打开" —— 如实告知，不要静默。
+
+## 8. 注入链路（越狱加载器 → 引擎）
 
 1. 启用一个目标 App 并**完全退出**它
 2. 重新打开 → 浏览器访问 `http://<设备IP>:8088` 应能看到面板
@@ -78,7 +90,7 @@
 
 > **注意**：新装 tweak 后必须先 respring，否则 ElleKit 不会加载它。
 
-## 8. 回报内容
+## 9. 回报内容
 
 - 上面每一节的结论（通过 / 不通过 + 原样错误信息）
 - `cat` 出来的 state.plist 全文、`tail -40 /var/log/iosdecrypthub-updated.log`

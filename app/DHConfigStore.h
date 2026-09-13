@@ -23,6 +23,9 @@ NSDictionary *DHReadUpdaterState(void);
 /// 向 daemon 提交更新请求（check / install / rollback）；version 非空时安装指定版本
 BOOL DHWriteUpdateRequest(NSString *action, NSString *_Nullable version);
 
+/// 请求重启指定 App（结束进程并尽量重新打开，由 daemon 执行）
+BOOL DHWriteRestartRequest(NSString *bundleID);
+
 /// 拉取历史版本列表；回调在主线程。元素：@{@"tag": @"v1.25.1", @"version": @"1.25.1", @"date": @"2026-09-13"}
 void DHFetchReleases(void (^completion)(NSArray<NSDictionary *> *_Nullable releases, NSError *_Nullable error));
 
