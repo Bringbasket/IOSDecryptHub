@@ -1,9 +1,10 @@
-// DHRootViewController.h — 管理器主界面：状态 / 软件更新 / 注入应用 / 关于
+// DHRootViewController.h — 主界面：管理与查看注入的 App
 
 #import <UIKit/UIKit.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// 应用管理页：搜索、已启用置顶、每行图标+名称+开关
 @interface DHRootViewController : UITableViewController
 @end
 
