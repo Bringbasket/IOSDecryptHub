@@ -8,8 +8,10 @@
 # 包内组件:
 #   IOSDecryptHubLoader.dylib  ElleKit 注入加载器（读名单 → dlopen 引擎，无 hook）
 #   decrypt_helper.dylib       闭源引擎（vendor 成品）
-#   IOSDecryptHubManager.app   管理器 App（开关 / 状态 / 更新入口）
+#   IOSDecryptHubManager.app   管理器 App（唯一入口：应用开关 / 更新 / 关于）
 #   IOSDecryptHubUpdated       updater daemon，一次性进程（检查/安装/回滚），见 AGENTS.md
+#
+# 设置面板（PreferenceBundle）已移除：与管理器 App 功能重复，只保留 App 一个入口。
 #
 # 用法:
 #   ./build_deb.sh              # 构建全部目标
@@ -58,9 +60,8 @@ command -v ldid >/dev/null 2>&1 || error "需要 ldid (brew install ldid)"
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 CC=$(xcrun --find clang)
 LOADER_SRC="$SCRIPT_DIR/src/loader.m"
-PREFS_SRC="$SCRIPT_DIR/prefs/IOSDecryptHubPrefsListController.m"
-PREFS_ICON="$SCRIPT_DIR/prefs/icon.png"
-WECHAT_PNG="$SCRIPT_DIR/prefs/wechat-follow.png"
+APP_ICON="$SCRIPT_DIR/app/Icon.png"
+APP_WECHAT="$SCRIPT_DIR/app/wechat-follow.png"
 APP_SRCS="$SCRIPT_DIR/app/DHManagerAppDelegate.m $SCRIPT_DIR/app/DHRootViewController.m $SCRIPT_DIR/app/DHSettingsViewController.m $SCRIPT_DIR/app/DHVersionsViewController.m $SCRIPT_DIR/app/DHConfigStore.m $SCRIPT_DIR/app/DHAppEnumerator.m"
 APP_INFO="$SCRIPT_DIR/app/Info.plist"
 APP_ENTITLEMENTS="$SCRIPT_DIR/app/entitlements.plist"
@@ -84,30 +85,6 @@ compile_loader() {
         -ObjC -fobjc-arc -Wall -O2 \
         -framework Foundation \
         "$LOADER_SRC" -o "$OUT"
-}
-
-compile_prefs() {
-    local ARCHS="$1"
-    local BUNDLE_DIR="$2"
-    local ARCH_FLAGS=()
-    local ARCH
-    for ARCH in $ARCHS; do
-        ARCH_FLAGS+=( -arch "$ARCH" )
-    done
-    info "编译设置面板 (archs=$ARCHS)..."
-    mkdir -p "$BUNDLE_DIR"
-    $CC "${ARCH_FLAGS[@]}" -isysroot "$SDK" -miphoneos-version-min=14.0 \
-        -bundle \
-        -ObjC -fobjc-arc -Wall -O2 \
-        -framework Foundation -framework UIKit \
-        -undefined dynamic_lookup \
-        "$PREFS_SRC" -o "$BUNDLE_DIR/IOSDecryptHubPrefs"
-    cp "$SCRIPT_DIR/prefs/Info.plist" "$BUNDLE_DIR/"
-    cp "$SCRIPT_DIR/prefs/Root.plist" "$BUNDLE_DIR/"
-    [ -f "$PREFS_ICON" ] || error "缺少 prefs/icon.png"
-    cp "$PREFS_ICON" "$BUNDLE_DIR/icon.png"
-    [ -f "$WECHAT_PNG" ] || error "缺少 prefs/wechat-follow.png"
-    cp "$WECHAT_PNG" "$BUNDLE_DIR/wechat-follow.png"
 }
 
 compile_app() {
@@ -171,25 +148,19 @@ build_variant() {
     local PREFIX="$2"
     local ARCHITECTURE="$3"
     local MACHO_ARCHS="$4"
-    # 偏好面板可单独指定架构：Preferences(设置) 进程在 arm64e 设备上是 arm64e，
-    # 只有 arm64 的 bundle 会被 dyld 以 incompatible architecture 拒绝加载，
-    # 故 rootless 也需把面板编成胖 arm64+arm64e（arm64 切片保留对 A11 的兼容）。
-    local PREFS_MACHO_ARCHS="${5:-$MACHO_ARCHS}"
     # 管理器 App 与 updater daemon 是独立进程，arm64 单切片即可运行；
     # roothide 用胖切片以匹配其全 arm64e 要求。
-    local APP_MACHO_ARCHS="${6:-$MACHO_ARCHS}"
+    local APP_MACHO_ARCHS="${5:-$MACHO_ARCHS}"
 
     local STAGE="$BUILD_DIR/stage-$VARIANT"
     local DEB_OUT="$BUILD_DIR/${PKG_NAME}_${VERSION}_${VARIANT}.deb"
     local LOADER_OUT="$BUILD_DIR/_loader-${VARIANT}/IOSDecryptHubLoader.dylib"
-    local PREFS_BUNDLE="$BUILD_DIR/_prefs-${VARIANT}/IOSDecryptHubPrefs.bundle"
     local APP_EXEC="$BUILD_DIR/_app-${VARIANT}/$APP_NAME"
     local DAEMON_OUT="$BUILD_DIR/_daemon-${VARIANT}/$DAEMON_BIN"
     local ENGINE_DYLIB
 
     ENGINE_DYLIB=$(require_vendor_dylib "$VARIANT" "$MACHO_ARCHS")
     compile_loader "$MACHO_ARCHS" "$LOADER_OUT"
-    compile_prefs "$PREFS_MACHO_ARCHS" "$PREFS_BUNDLE"
     compile_app "$APP_MACHO_ARCHS" "$APP_EXEC"
     compile_daemon "$APP_MACHO_ARCHS" "$DAEMON_OUT"
 
@@ -202,8 +173,6 @@ build_variant() {
     mkdir -p "$STAGE/DEBIAN"
     mkdir -p "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries"
     mkdir -p "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub"
-    mkdir -p "$STAGE/${PREFIX}/Library/PreferenceBundles"
-    mkdir -p "$STAGE/${PREFIX}/Library/PreferenceLoader/Preferences"
     mkdir -p "$STAGE/${PREFIX}/Applications/$APP_NAME.app"
     mkdir -p "$STAGE/${PREFIX}/Library/LaunchDaemons"
 
@@ -216,7 +185,7 @@ Description: iOS 运行时安全分析工具 — 注入目标 App 后实时查�
 Maintainer: IOSDecryptHub
 Author: IOSDecryptHub
 Section: Tweaks
-Depends: ellekit, preferenceloader
+Depends: ellekit
 Conflicts: com.iosdecrypthub.trollstore
 CTRL
 
@@ -249,15 +218,15 @@ VP
     cp "$APP_EXEC" "$STAGE/${PREFIX}/Applications/$APP_NAME.app/$APP_NAME"
     sed "s/@VERSION@/${VERSION}/g" "$APP_INFO" \
         > "$STAGE/${PREFIX}/Applications/$APP_NAME.app/Info.plist"
-    [ -f "$PREFS_ICON" ] || error "缺少 prefs/icon.png (App 图标)"
+    [ -f "$APP_ICON" ] || error "缺少 app/Icon.png (App 图标)"
+    [ -f "$APP_WECHAT" ] || error "缺少 app/wechat-follow.png（App 里的公众号引导）"
     # 桌面图标按标准三档出图：只给一张 120×120 时部分系统/缩放档位会渲染成空白
     local APP_ICON_DIR="$STAGE/${PREFIX}/Applications/$APP_NAME.app"
-    [ -f "$WECHAT_PNG" ] || error "缺少 prefs/wechat-follow.png（App 里的公众号引导）"
-    cp "$WECHAT_PNG" "$APP_ICON_DIR/wechat-follow.png"
-    cp "$PREFS_ICON" "$APP_ICON_DIR/Icon.png"
-    sips -z 60 60 "$PREFS_ICON" --out "$APP_ICON_DIR/Icon.png" >/dev/null 2>&1 || true
-    sips -z 120 120 "$PREFS_ICON" --out "$APP_ICON_DIR/Icon@2x.png" >/dev/null 2>&1 || true
-    sips -z 180 180 "$PREFS_ICON" --out "$APP_ICON_DIR/Icon@3x.png" >/dev/null 2>&1 || true
+    cp "$APP_WECHAT" "$APP_ICON_DIR/wechat-follow.png"
+    cp "$APP_ICON" "$APP_ICON_DIR/Icon.png"
+    sips -z 60 60 "$APP_ICON" --out "$APP_ICON_DIR/Icon.png" >/dev/null 2>&1 || true
+    sips -z 120 120 "$APP_ICON" --out "$APP_ICON_DIR/Icon@2x.png" >/dev/null 2>&1 || true
+    sips -z 180 180 "$APP_ICON" --out "$APP_ICON_DIR/Icon@3x.png" >/dev/null 2>&1 || true
     [ -f "$APP_ICON_DIR/Icon@2x.png" ] || error "App 图标生成失败"
     [ -f "$APP_ICON_DIR/Icon@3x.png" ] || error "App 图标生成失败"
 
@@ -329,18 +298,12 @@ exit 0
 POSTRM
     chmod 0755 "$STAGE/DEBIAN/postrm"
 
-    cp -R "$PREFS_BUNDLE" "$STAGE/${PREFIX}/Library/PreferenceBundles/"
-    cp "$SCRIPT_DIR/prefs/entry.plist" "$STAGE/${PREFIX}/Library/PreferenceLoader/Preferences/IOSDecryptHubPrefs.plist"
-
     verify_macho_arch \
         "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.dylib" \
         "$MACHO_ARCHS" "$VARIANT 加载器"
     verify_macho_arch \
         "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/decrypt_helper.dylib" \
         "$MACHO_ARCHS" "$VARIANT 主 dylib"
-    verify_macho_arch \
-        "$STAGE/${PREFIX}/Library/PreferenceBundles/IOSDecryptHubPrefs.bundle/IOSDecryptHubPrefs" \
-        "$PREFS_MACHO_ARCHS" "$VARIANT 设置面板"
     verify_macho_arch \
         "$STAGE/${PREFIX}/Applications/$APP_NAME.app/$APP_NAME" \
         "$APP_MACHO_ARCHS" "$VARIANT 管理器 App"
@@ -350,7 +313,6 @@ POSTRM
 
     ldid -S "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.dylib"
     ldid -S "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/decrypt_helper.dylib"
-    ldid -S "$STAGE/${PREFIX}/Library/PreferenceBundles/IOSDecryptHubPrefs.bundle/IOSDecryptHubPrefs"
     ldid -S"$APP_ENTITLEMENTS" "$STAGE/${PREFIX}/Applications/$APP_NAME.app/$APP_NAME"
     ldid -S "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN"
 
@@ -379,38 +341,14 @@ POSTRM
 
     [ "$ACTUAL_ARCH" = "$ARCHITECTURE" ] || error "$VARIANT 架构错误: 期望 $ARCHITECTURE, 实际 $ACTUAL_ARCH"
 
-    [ "$ACTUAL_DEPENDS" = "ellekit, preferenceloader" ] \
+    [ "$ACTUAL_DEPENDS" = "ellekit" ] \
         || error "$VARIANT 依赖集合错误: $ACTUAL_DEPENDS"
 
     if [ "$VARIANT" = "roothide" ]; then
         case "$PACKAGE_CONTENTS" in
             *"./var/jb/"*) error "roothide 包不得包含固定 /var/jb 前缀" ;;
         esac
-        case "$PACKAGE_CONTENTS" in
-            *"./Library/PreferenceLoader/Preferences/IOSDecryptHubPrefs.plist"*) ;;
-            *) error "roothide 设置入口未安装到 jbroot 根路径" ;;
-        esac
-    else
-        case "$PACKAGE_CONTENTS" in
-            *"./var/jb/Library/PreferenceLoader/Preferences/IOSDecryptHubPrefs.plist"*) ;;
-            *) error "rootless 设置入口缺少 /var/jb 前缀" ;;
-        esac
     fi
-
-    case "$PACKAGE_CONTENTS" in
-        *"/PreferenceLoader/Preferences/IOSDecryptHubPrefs.plist"*) ;;
-        *) error "$VARIANT 缺少设置入口" ;;
-    esac
-
-    case "$PACKAGE_CONTENTS" in
-        *"/PreferenceBundles/IOSDecryptHubPrefs.bundle/icon.png"*) ;;
-        *) error "$VARIANT 缺少设置图标" ;;
-    esac
-
-    case "$PACKAGE_CONTENTS" in
-        *"/PreferenceBundles/IOSDecryptHubPrefs.bundle/wechat-follow.png"*) ;;
-        *) error "$VARIANT 缺少设置页公众号物料" ;;
-    esac
 
     case "$PACKAGE_CONTENTS" in
         *"/usr/lib/IOSDecryptHub/enabledBundles.default.plist"*) ;;
@@ -495,17 +433,17 @@ mkdir -p "$BUILD_DIR"
 case "$TARGET" in
     all)
         build_variant "rootless" "/var/jb" \
-            "iphoneos-arm64" "arm64" "arm64 arm64e" "arm64"
+            "iphoneos-arm64" "arm64" "arm64"
         build_variant "roothide" "" \
-            "iphoneos-arm64e" "arm64 arm64e" "arm64 arm64e" "arm64 arm64e"
+            "iphoneos-arm64e" "arm64 arm64e" "arm64 arm64e"
         ;;
     rootless)
         build_variant "rootless" "/var/jb" \
-            "iphoneos-arm64" "arm64" "arm64 arm64e" "arm64"
+            "iphoneos-arm64" "arm64" "arm64"
         ;;
     roothide)
         build_variant "roothide" "" \
-            "iphoneos-arm64e" "arm64 arm64e" "arm64 arm64e" "arm64 arm64e"
+            "iphoneos-arm64e" "arm64 arm64e" "arm64 arm64e"
         ;;
 esac
 
