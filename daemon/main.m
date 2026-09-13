@@ -486,22 +486,41 @@ static void dh_do_check(void) {
     dh_log("检查更新: 本地 %s 最新 %s", dh_local_version().UTF8String, ((NSString *)tag).UTF8String);
 }
 
-static void dh_do_install(void) {
-    NSString *resolveErr = nil;
-    NSDictionary *latest = dh_resolve_latest(&resolveErr);
-    if (!latest) {
-        dh_record_op(@"install", nil, @"error", resolveErr ?: @"网络失败", nil);
-        return;
+// requestedVersion 非空时安装指定版本（历史版本功能），否则安装线上最新版
+static void dh_do_install(NSString *_Nullable requestedVersion) {
+    BOOL explicitVersion = requestedVersion.length > 0;
+    NSString *tag = nil;
+    NSString *version = nil;
+    NSString *downloadURL = nil;
+
+    if (explicitVersion) {
+        // 指定版本不查"最新版"：直接按发布命名约定拼地址（与主路径同一约定）
+        tag = [requestedVersion hasPrefix:@"v"] ? requestedVersion
+                                                : [@"v" stringByAppendingString:requestedVersion];
+        version = dh_strip_v(tag);
+        downloadURL = [NSString stringWithFormat:DH_ASSET_FMT, tag, version];
+    } else {
+        NSString *resolveErr = nil;
+        NSDictionary *latest = dh_resolve_latest(&resolveErr);
+        if (!latest) {
+            dh_record_op(@"install", nil, @"error", resolveErr ?: @"网络失败", nil);
+            return;
+        }
+        tag = latest[@"tag"];
+        version = latest[@"version"];
+        downloadURL = latest[@"url"];
     }
-    NSString *tag = latest[@"tag"];
-    NSString *version = latest[@"version"];
-    NSString *downloadURL = latest[@"url"];
+
     NSString *local = dh_local_version();
     g_state[@"latestVersion"] = tag;
-    if (dh_compare_versions(local, version) != NSOrderedAscending) {
+    // 指定版本：只跳过"已经是这个版本"；最新版路径：不比线上旧就不动
+    BOOL skip = explicitVersion ? [local isEqualToString:version]
+                                : (dh_compare_versions(local, version) != NSOrderedAscending);
+    if (skip) {
         g_state[@"updateAvailable"] = @NO;
         dh_state_save();
-        dh_record_op(@"install", version, @"skipped", @"已是最新，无需安装", nil);
+        dh_record_op(@"install", version, @"skipped",
+                     explicitVersion ? @"已经是这个版本" : @"已是最新，无需安装", nil);
         return;
     }
     NSString *curPath = [g_engine_dir stringByAppendingPathComponent:DH_ENGINE_NAME];
@@ -669,7 +688,9 @@ static void dh_process_request(void) {
     if ([action isEqualToString:DH_REQ_CHECK]) {
         dh_do_check();
     } else if ([action isEqualToString:DH_REQ_INSTALL]) {
-        dh_do_install();
+        // 请求可带 version（历史版本）；不带则装线上最新
+        id wantVersion = req[@"version"];
+        dh_do_install([wantVersion isKindOfClass:[NSString class]] ? wantVersion : nil);
     } else if ([action isEqualToString:DH_REQ_ROLLBACK]) {
         dh_do_rollback();
     } else {

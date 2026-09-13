@@ -99,6 +99,10 @@ reset_env(){ # reset_env <version 或 ->：'-' 表示不装引擎（测无引擎
 }
 
 request(){ write_plist "${REQUEST}" "<dict><key>action</key><string>$1</string></dict>"; }
+# 历史版本：请求可带 version
+request_version(){ # request_version <action> <version>
+    write_plist "${REQUEST}" "<dict><key>action</key><string>$1</string><key>version</key><string>$2</string></dict>"
+}
 
 echo "[build] 编译 macOS 版 daemon（按真机布局放进仿真 bootstrap）"
 build_daemon "${ENGINE_DIR}/daemon" || { echo "daemon 编译失败"; exit 2; }
@@ -294,6 +298,25 @@ else
     ng "兜底路径版 daemon 编译失败"
 fi
 make_headers  # 还原头文件
+
+echo
+echo "--- T10 安装指定版本（历史版本：从最新版降级到旧版）"
+OLD_VER="1.24.8"
+OLD_URL="https://github.com/decrypthub/IOSDecryptHub/releases/download/v${OLD_VER}/decrypt_helper-${OLD_VER}.dylib"
+OLD_BASE="${WORK}/old.dylib"
+reset_env "${LATEST_TAG#v}"        # 本地装作最新版，验证"降级"确实被允许
+if curl -sfL --max-time 120 "${OLD_URL}" -o "${OLD_BASE}"; then
+    request_version install "${OLD_VER}"
+    "${DAEMON}"
+    eq "$(sha "${ENGINE_DIR}/decrypt_helper.dylib")" "$(sha "${OLD_BASE}")" "引擎已切到指定旧版"
+    neq "$(sha "${ENGINE_DIR}/decrypt_helper.dylib")" "$(sha "${EXPECTED}")" "确实不是最新版了"
+    eq "$(plist_get "${ENGINE_DIR}/version.plist" version)" "${OLD_VER}" "版本元信息 = 指定版本"
+    eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:version)" "${OLD_VER}" "state 记录了指定版本"
+    eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:result)" "ok" "结果 ok"
+    eq "$(sha "${ENGINE_DIR}/decrypt_helper.dylib.bak")" "${OLD_SHA}"         "备份是切换前的最新版（可再切回来）"
+else
+    ng "无法下载 ${OLD_VER} 的基准 dylib（网络）"
+fi
 
 echo
 printf 'updater 仿真结果: PASS=%d FAIL=%d\n' "${PASS}" "${FAIL}"
