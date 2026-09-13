@@ -155,7 +155,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 - (NSString *)tableView:(__unused UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     // 只留一句真正需要用户做动作的话，放在"已启用"页（管理开关的地方）
     if (!self.searching && self.enabledOnly && section == 0) {
-        return @"开关改动后需重启目标 App 才生效；也可在下面的列表里左滑选择「重启」。";
+        return @"改动会在目标 App 重启后生效：若它正在运行，我们会自动帮你重启。";
     }
     return nil;
 }
@@ -231,20 +231,37 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 
 // 重启由 daemon 异步执行；只在"没能自动打开"这类需要用户接手的情况下提示一句。
 - (void)watchRestartResultFor:(NSString *)bundleID {
-    // 轮询必须在后台：这个方法是滑动动作直接调的，睡在主线程会把界面冻住
+    [self watchRestartResultFor:bundleID tellOnSuccess:NO];
+}
+
+- (void)watchRestartResultFor:(NSString *)bundleID tellOnSuccess:(BOOL)tell {
+    // 轮询必须在后台：这个方法是滑动动作/开关回调直接调的，睡在主线程会把界面冻住
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        [self pollRestartResultFor:bundleID];
+        [self pollRestartResultFor:bundleID tellOnSuccess:tell];
     });
 }
 
-- (void)pollRestartResultFor:(NSString *)bundleID {
+- (void)flashRestarted:(NSString *)name {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil
+        message:[NSString stringWithFormat:@"已重启 %@ 以应用改动", name]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:alert animated:YES completion:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ [alert dismissViewControllerAnimated:YES completion:nil]; });
+}
+
+- (void)pollRestartResultFor:(NSString *)bundleID tellOnSuccess:(BOOL)tell {
     for (int i = 0; i < 12; i++) {
         [NSThread sleepForTimeInterval:0.5];
         NSDictionary *op = DHReadUpdaterState()[@"lastOp"];
         if (![op isKindOfClass:[NSDictionary class]]) continue;
         if (![op[@"bundle"] isEqualToString:bundleID]) continue;
         dispatch_async(dispatch_get_main_queue(), ^{
-            if ([op[@"relaunched"] boolValue]) return;   // 已自动打开，不用打扰用户
+            if ([op[@"relaunched"] boolValue]) {
+                // 已自动打开；只有开关触发的才给一条会自己消失的提示，滑动的不用
+                if (tell) [self flashRestarted:bundleID];
+                return;
+            }
             NSString *message = [op[@"result"] isEqualToString:@"skipped"]
                 ? @"该 App 当前没有在运行。"
                 : @"已结束它，请手动打开以让改动生效。";
@@ -278,8 +295,21 @@ typedef NS_ENUM(NSInteger, DHFilter) {
         return;
     }
     self.enabled = next;
-    [self rebuild];              // 新启用的立刻出现在置顶分区
+    [self rebuild];
     [self.tableView reloadData];
+
+    // 关掉/打开都只有重启目标 App 才生效。用户不知道这一点，所以由我们来判断：
+    // 目标正在运行时自动重启它；没在运行时什么都不做（下次打开自然是新状态）。
+    // 这样批量开关多个 App 时不会弹一堆确认框。
+    // 例外：本 App 自己。用户此刻正在用它，唯一必然在运行的就是它 —— 自杀式重启很荒唐，
+    // 而且它本来也不需要"重启生效"（改动下次打开自然是新状态）。
+    NSString *selfBundle = [[NSBundle mainBundle] bundleIdentifier];
+    BOOL isSelf = [app.bundleID isEqualToString:selfBundle];
+    if (!isSelf && DHAppProcessRunning(app)) {
+        if (DHWriteRestartRequest(app.bundleID)) {
+            [self watchRestartResultFor:app.bundleID tellOnSuccess:YES];
+        }
+    }
 }
 
 @end

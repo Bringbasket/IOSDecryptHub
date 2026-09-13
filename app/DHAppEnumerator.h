@@ -22,6 +22,9 @@ UIImage *_Nullable DHAppIcon(NSString *bundleID, NSString *_Nullable bundlePath)
 /// 列表用图标：圆角（R 角）、固定尺寸、带缓存；取不到图标时返回"首字母"默认图标，绝不空着
 UIImage *DHAppListIcon(NSString *bundleID, NSString *_Nullable bundlePath, NSString *_Nullable displayName);
 
+/// 该 App 当前是否在运行（按可执行名匹配；越狱环境下本 App 未沙盒化，可枚举进程）
+BOOL DHAppProcessRunning(DHAppInfo *app);
+
 /// 分组用索引字母：中文按拼音首字母（如 微信 → W），非字母归到 "#"
 NSString *DHAppIndexLetter(NSString *displayName);
 

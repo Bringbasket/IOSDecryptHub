@@ -3,6 +3,9 @@
 #import "DHAppEnumerator.h"
 #import <dlfcn.h>
 #import <objc/message.h>
+#import <sys/sysctl.h>
+#import <stdlib.h>
+#import <string.h>
 
 @implementation DHAppInfo
 @end
@@ -242,4 +245,52 @@ NSString *DHAppIndexLetter(NSString *displayName) {
         if (c >= '0' && c <= '9') return @"#";
     }
     return @"#";
+}
+
+#pragma mark - 运行状态
+
+// 与 daemon 相同的匹配规则：p_comm 最长 16 字节，短名精确比、长名比前缀
+static BOOL dh_process_running(const char *want) {
+    if (!want || !want[0]) return NO;
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+    size_t len = 0;
+    if (sysctl(mib, 4, NULL, &len, NULL, 0) != 0 || len == 0) return NO;
+    struct kinfo_proc *procs = malloc(len);
+    if (!procs) return NO;
+    BOOL found = NO;
+    if (sysctl(mib, 4, procs, &len, NULL, 0) == 0) {
+        size_t count = len / sizeof(struct kinfo_proc);
+        size_t wantLen = strlen(want);
+        for (size_t i = 0; i < count; i++) {
+            char comm[MAXCOMLEN + 1];
+            memcpy(comm, procs[i].kp_proc.p_comm, MAXCOMLEN);
+            comm[MAXCOMLEN] = '\0';
+            BOOL match = (wantLen <= MAXCOMLEN - 1)
+                ? (strcmp(comm, want) == 0)
+                : (strncmp(comm, want, MAXCOMLEN - 1) == 0);
+            if (match) { found = YES; break; }
+        }
+    }
+    free(procs);
+    return found;
+}
+
+static NSString *dh_bundle_executable(NSString *bundlePath) {
+    static NSMutableDictionary<NSString *, NSString *> *cache = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+    if (bundlePath.length == 0) return nil;
+    if (cache[bundlePath]) return cache[bundlePath];
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+        [bundlePath stringByAppendingPathComponent:@"Info.plist"]];
+    NSString *exec = info[@"CFBundleExecutable"];
+    if (![exec isKindOfClass:[NSString class]] || exec.length == 0) exec = nil;
+    if (exec) cache[bundlePath] = exec;
+    return exec;
+}
+
+BOOL DHAppProcessRunning(DHAppInfo *app) {
+    NSString *exec = dh_bundle_executable(app.bundlePath);
+    if (exec.length == 0) return NO;      // 拿不到可执行名就当没在跑：宁可不动作，也不误杀/误启
+    return dh_process_running(exec.UTF8String);
 }
