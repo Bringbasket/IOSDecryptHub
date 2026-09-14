@@ -6,6 +6,11 @@
 #import <sys/sysctl.h>
 #import <stdlib.h>
 #import <string.h>
+#import <signal.h>
+#import <unistd.h>
+#import <spawn.h>
+
+extern char **environ;
 
 @implementation DHAppInfo
 @end
@@ -17,6 +22,7 @@
 - (NSString *)localizedName;
 - (NSString *)applicationType;
 - (NSURL *)bundleURL;
+- (BOOL)openApplicationWithBundleID:(NSString *)bundleID;
 @end
 
 static NSDictionary<NSString *, id> *dh_collect(void) {
@@ -293,4 +299,102 @@ BOOL DHAppProcessRunning(DHAppInfo *app) {
     NSString *exec = dh_bundle_executable(app.bundlePath);
     if (exec.length == 0) return NO;      // 拿不到可执行名就当没在跑：宁可不动作，也不误杀/误启
     return dh_process_running(exec.UTF8String);
+}
+
+BOOL DHKillAppProcess(DHAppInfo *app) {
+    NSString *exec = dh_bundle_executable(app.bundlePath);
+    if (exec.length == 0) return NO;
+    const char *want = exec.UTF8String;
+    if (!want || !want[0]) return NO;
+    pid_t selfPid = getpid();
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+    size_t len = 0;
+    if (sysctl(mib, 4, NULL, &len, NULL, 0) != 0 || len == 0) return NO;
+    struct kinfo_proc *procs = malloc(len);
+    if (!procs) return NO;
+    BOOL killed = NO;
+    if (sysctl(mib, 4, procs, &len, NULL, 0) == 0) {
+        size_t count = len / sizeof(struct kinfo_proc);
+        size_t wantLen = strlen(want);
+        for (size_t i = 0; i < count; i++) {
+            pid_t pid = procs[i].kp_proc.p_pid;
+            if (pid <= 1 || pid == selfPid) continue;
+            char comm[MAXCOMLEN + 1];
+            memcpy(comm, procs[i].kp_proc.p_comm, MAXCOMLEN);
+            comm[MAXCOMLEN] = '\0';
+            BOOL match = (wantLen <= MAXCOMLEN - 1)
+                ? (strcmp(comm, want) == 0)
+                : (strncmp(comm, want, MAXCOMLEN - 1) == 0);
+            if (match && kill(pid, SIGKILL) == 0) killed = YES;
+        }
+    }
+    free(procs);
+    return killed;
+}
+
+static NSString *_Nullable dh_manager_jbroot(void) {
+    Dl_info info = {0};
+    if (dladdr((const void *)&dh_manager_jbroot, &info) == 0 || !info.dli_fname) return nil;
+    NSString *root = [NSString stringWithUTF8String:info.dli_fname];
+    for (int i = 0; i < 3; i++) root = [root stringByDeletingLastPathComponent];
+    return root.length ? root : nil;
+}
+
+static BOOL dh_open_with_workspace(NSString *bundleID) {
+    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    static const char *frameworks[] = {
+        "/System/Library/PrivateFrameworks/MobileCoreServices.framework/MobileCoreServices",
+        "/System/Library/Frameworks/CoreServices.framework/CoreServices",
+        NULL,
+    };
+    for (NSUInteger i = 0; !workspaceClass && frameworks[i]; i++) {
+        dlopen(frameworks[i], RTLD_LAZY | RTLD_LOCAL);
+        workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    }
+    if (!workspaceClass || ![workspaceClass respondsToSelector:@selector(defaultWorkspace)]) return NO;
+    id workspace = [workspaceClass defaultWorkspace];
+    if (![workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) return NO;
+    @try {
+        return [workspace openApplicationWithBundleID:bundleID];
+    } @catch (__unused NSException *e) {
+        return NO;
+    }
+}
+
+static BOOL dh_open_with_sbs(NSString *bundleID) {
+    void *sbs = dlopen(
+        "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
+        RTLD_LAZY | RTLD_LOCAL);
+    if (!sbs) return NO;
+    typedef int (*SBSLaunchFn)(CFStringRef, Boolean);
+    SBSLaunchFn launch = (SBSLaunchFn)dlsym(sbs, "SBSLaunchApplicationWithIdentifier");
+    if (!launch) return NO;
+    return launch((__bridge CFStringRef)bundleID, false) == 0;
+}
+
+static BOOL dh_open_with_uiopen(NSString *bundleID) {
+    NSMutableArray<NSString *> *tools = [NSMutableArray array];
+    NSString *root = dh_manager_jbroot();
+    if (root) [tools addObject:[root stringByAppendingPathComponent:@"usr/bin/uiopen"]];
+    [tools addObject:@"/usr/bin/uiopen"];
+    [tools addObject:@"/var/jb/usr/bin/uiopen"];
+    [tools addObject:@"/usr/local/bin/uiopen"];
+    for (NSString *tool in tools) {
+        if (access(tool.fileSystemRepresentation, X_OK) != 0) continue;
+        pid_t pid = 0;
+        const char *argv[] = {
+            tool.fileSystemRepresentation, "--bundleid", bundleID.UTF8String, NULL
+        };
+        if (posix_spawn(&pid, argv[0], NULL, NULL, (char * const *)argv, environ) == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+BOOL DHRelaunchApp(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+    if (dh_open_with_workspace(bundleID)) return YES;
+    if (dh_open_with_sbs(bundleID)) return YES;
+    return dh_open_with_uiopen(bundleID);
 }

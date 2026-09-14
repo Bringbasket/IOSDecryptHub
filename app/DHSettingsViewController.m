@@ -80,16 +80,9 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 }
 
 - (void)refreshAvailability {
-    NSString *installed = DHReadEngineMeta()[@"version"];
-    NSString *latest = self.latestVersion ?: [self.updaterState[@"latestVersion"] stringByTrimmingCharactersInSet:
-        [NSCharacterSet characterSetWithCharactersInString:@"vV"]];
-    BOOL found = NO;
-    if ([installed isKindOfClass:[NSString class]] && installed.length &&
-        [latest isKindOfClass:[NSString class]] && latest.length) {
-        found = DHCompareVersions(installed, latest) == NSOrderedAscending;
-    }
-    self.latestVersion = found ? latest : nil;
-    self.hasUpdateRow = found;
+    NSString *pending = self.latestVersion ?: DHPendingUpdateVersion();
+    self.latestVersion = pending;
+    self.hasUpdateRow = (pending != nil);
 }
 
 #pragma mark - 表格
@@ -123,6 +116,10 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
             : @"上次更新失败，已保留原版本。";
     }
     if (self.working) return @"正在检查更新…";
+    // 有新版就在这里点出来（全 App 唯一一处按需出现的版本号）
+    if (self.hasUpdateRow && self.latestVersion.length) {
+        return [NSString stringWithFormat:@"发现新版本 %@，点上方安装。", self.latestVersion];
+    }
     return nil;
 }
 

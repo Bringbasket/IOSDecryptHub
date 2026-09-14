@@ -368,5 +368,15 @@ eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:relaunched)" "" "stop 不写 
 kill -9 "${VICTIM_PID}" 2>/dev/null; VICTIM_PID=""
 
 echo
+echo "--- T13 daemon 代写启用名单（App 在 rootHide 下 EPERM，走请求通道）"
+reset_env "${LATEST_TAG#v}"
+write_plist "${REQUEST}" '<dict><key>action</key><string>set-enabled</string><key>enabledBundles</key><array><string>com.sim.victim</string><string>com.sim.other</string></array></dict>'
+"${DAEMON}"
+eq "$(plist_get "${ENGINE_DIR}/config/enabledBundles.plist" enabledBundles:0)" "com.sim.other" "名单按字母序写入第一项"
+eq "$(plist_get "${ENGINE_DIR}/config/enabledBundles.plist" enabledBundles:1)" "com.sim.victim" "名单写入第二项"
+eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:kind)" "set-enabled" "记录的动作是 set-enabled"
+eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:result)" "ok" "结果 ok"
+
+echo
 printf 'updater 仿真结果: PASS=%d FAIL=%d\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]

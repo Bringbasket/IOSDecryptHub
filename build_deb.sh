@@ -198,6 +198,7 @@ CTRL
     cp "$SCRIPT_DIR/enabledBundles.default.plist" \
         "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/enabledBundles.default.plist"
     cp "$DAEMON_OUT" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN"
+    cp "$SCRIPT_DIR/daemon/updated.sh" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/updated.sh"
 
     # 仓库公钥装进 APT 信任链：不然现代 APT 会因 Release 未受信任而报 E:
     # （"is not signed"）并拒绝更新索引 —— 用户就永远看不到新版本。
@@ -245,7 +246,11 @@ CONFIG_PATH="\$CONFIG_DIR/enabledBundles.plist"
 DEFAULT_PATH="${PREFIX}/usr/lib/IOSDecryptHub/enabledBundles.default.plist"
 LEGACY_PATH="/var/mobile/Library/Preferences/com.iosdecrypthub.loader.plist"
 mkdir -p "\$CONFIG_DIR"
-if [ ! -f "\$CONFIG_PATH" ]; then
+LOADER_PREFS="/var/mobile/Library/Preferences/com.iosdecrypthub.loader.plist"
+# 沙盒目标读 jb 这份。升级时以 prefs 覆盖，避免开关已开却仍用旧 jb 名单。
+if [ -f "\$LOADER_PREFS" ]; then
+    cp "\$LOADER_PREFS" "\$CONFIG_PATH"
+elif [ ! -f "\$CONFIG_PATH" ]; then
     if [ -f "\$LEGACY_PATH" ]; then
         cp "\$LEGACY_PATH" "\$CONFIG_PATH"
     else
@@ -253,8 +258,20 @@ if [ ! -f "\$CONFIG_PATH" ]; then
     fi
 fi
 chown mobile:mobile "\$CONFIG_DIR" "\$CONFIG_PATH" 2>/dev/null || true
-chmod 0755 "\$CONFIG_DIR"
-chmod 0644 "\$CONFIG_PATH"
+chmod 0777 "\$CONFIG_DIR"
+chmod 0666 "\$CONFIG_PATH"
+mkdir -p /var/mobile/Library/Caches/com.iosdecrypthub
+chown mobile:mobile /var/mobile/Library/Caches/com.iosdecrypthub 2>/dev/null || true
+chmod 0777 /var/mobile/Library/Caches/com.iosdecrypthub
+# 设备上还没有 prefs 时，从 jb 拷一份给管理器当初始名单。
+if [ ! -f "\$LOADER_PREFS" ] && [ -f "\$CONFIG_PATH" ]; then
+    cp "\$CONFIG_PATH" "\$LOADER_PREFS"
+fi
+if [ -f "\$LOADER_PREFS" ]; then
+    chown mobile:mobile "\$LOADER_PREFS" 2>/dev/null || true
+    chmod 0644 "\$LOADER_PREFS"
+fi
+rm -f /var/mobile/Library/Preferences/com.iosdecrypthub.enabledBundles.plist
 ENGINE_DIR="${PREFIX}/usr/lib/IOSDecryptHub"
 # 引擎与 updater 由 root 专属管理（daemon 写，App 只读）
 chown root:wheel "\$ENGINE_DIR" "\$ENGINE_DIR"/decrypt_helper.dylib* "\$ENGINE_DIR"/$DAEMON_BIN "\$ENGINE_DIR"/version.plist 2>/dev/null || true
@@ -273,8 +290,28 @@ if [ ! -f "\$REQUEST_PATH" ]; then
 fi
 chown mobile:mobile "\$REQUEST_PATH" 2>/dev/null || true
 chmod 0644 "\$REQUEST_PATH" 2>/dev/null || true
-# 拉起 updater daemon（一次性进程，按需运行；失败不阻断安装）
+# rootHide 在 jbroot=/ 时会把 LaunchDaemon 里的路径改写成 .jbroot-*/...，
+# launchd exec 返回 78（实测）。改用 /bin/sh 执行短路径脚本，
+# WatchPaths 盯 App 实际写入的 /var/mobile（不要走 .jbroot 前缀）。
 LAUNCHD_PLIST="${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist"
+printf '%s\n' \
+    '<?xml version="1.0" encoding="UTF-8"?>' \
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+    '<plist version="1.0"><dict>' \
+    '<key>Label</key><string>com.iosdecrypthub.updated</string>' \
+    '<key>ProgramArguments</key><array>' \
+    '<string>/bin/sh</string>' \
+    "<string>${PREFIX}/usr/lib/IOSDecryptHub/updated.sh</string>" \
+    '</array>' \
+    '<key>WatchPaths</key><array>' \
+    '<string>/var/mobile/Library/Preferences/com.iosdecrypthub.updater.request.plist</string>' \
+    '<string>/var/mobile/Library/Preferences/com.iosdecrypthub.loader.plist</string>' \
+    '</array>' \
+    '<key>StartInterval</key><integer>43200</integer>' \
+    '<key>RunAtLoad</key><false/>' \
+    '<key>StandardOutPath</key><string>/var/log/iosdecrypthub-updated.log</string>' \
+    '<key>StandardErrorPath</key><string>/var/log/iosdecrypthub-updated.log</string>' \
+    '</dict></plist>' > "\$LAUNCHD_PLIST"
 if command -v launchctl >/dev/null 2>&1; then
     launchctl bootout system "\$LAUNCHD_PLIST" 2>/dev/null || true
     launchctl bootstrap system "\$LAUNCHD_PLIST" 2>/dev/null || launchctl load "\$LAUNCHD_PLIST" 2>/dev/null || true
@@ -330,6 +367,7 @@ POSTRM
     chmod 0755 "$PKG_STAGE/DEBIAN"/postinst "$PKG_STAGE/DEBIAN"/postrm
     chmod 0755 "$PKG_STAGE/${PREFIX}/Applications/$APP_NAME.app/$APP_NAME"
     chmod 0755 "$PKG_STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN"
+    chmod 0755 "$PKG_STAGE/${PREFIX}/usr/lib/IOSDecryptHub/updated.sh"
     # 两个 dylib 用 0755：与 1.24.8 / 1.24.9（线上已验证可用）的权限完全一致，
     # 不引入任何与已验证产物不同的变量。
     chmod 0755 "$PKG_STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.dylib"
@@ -400,6 +438,11 @@ POSTRM
     esac
 
     case "$PACKAGE_CONTENTS" in
+        *"/usr/lib/IOSDecryptHub/updated.sh"*) ;;
+        *) error "$VARIANT 缺少 updater 包装脚本" ;;
+    esac
+
+    case "$PACKAGE_CONTENTS" in
         *"/Library/LaunchDaemons/com.iosdecrypthub.updated.plist"*) ;;
         *) error "$VARIANT 缺少 daemon 启动配置" ;;
     esac
@@ -422,7 +465,7 @@ POSTRM
         "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist" \
         || error "$VARIANT 的 daemon 启动配置 Label 错误"
 
-    grep -q "<string>${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN</string>" \
+    grep -q "<string>${PREFIX}/usr/lib/IOSDecryptHub/updated.sh</string>" \
         "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist" \
         || error "$VARIANT 的 daemon 可执行路径与前缀不一致"
 

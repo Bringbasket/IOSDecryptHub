@@ -24,6 +24,10 @@ UIImage *DHAppListIcon(NSString *bundleID, NSString *_Nullable bundlePath, NSStr
 
 /// 该 App 当前是否在运行（按可执行名匹配；越狱环境下本 App 未沙盒化，可枚举进程）
 BOOL DHAppProcessRunning(DHAppInfo *app);
+/// 结束该 App 进程；杀掉至少一个返回 YES。rootHide 下 daemon 写不了锁文件，重启必须由本 App 自己做。
+BOOL DHKillAppProcess(DHAppInfo *app);
+/// 重新打开 App（LaunchServices / SpringBoardServices / uiopen）。成功返回 YES。
+BOOL DHRelaunchApp(NSString *bundleID);
 
 /// 分组用索引字母：中文按拼音首字母（如 微信 → W），非字母归到 "#"
 NSString *DHAppIndexLetter(NSString *displayName);

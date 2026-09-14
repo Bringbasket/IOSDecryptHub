@@ -27,7 +27,9 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 @property (nonatomic, strong) UISegmentedControl *filter;
 @property (nonatomic, assign) BOOL searching;
 @property (nonatomic, assign) BOOL enabledOnly;
+@property (nonatomic, copy, nullable) NSString *freshLatest;   // App 自己刚查到的线上版本
 @property (nonatomic, strong) NSMutableArray<NSString *> *pendingRestart;   // 改了开关但还没重启的 App
+@property (nonatomic, copy) NSDictionary<NSString *, NSDictionary *> *injected;  // 本机 8088 探测到的已注入 App
 @end
 
 @implementation DHRootViewController
@@ -37,6 +39,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     [self loadPendingRestart];
+    [self refreshLatestIfStale];
     self.tableView.rowHeight = 56;
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     self.tableView.sectionIndexMinimumDisplayRowCount = 12;
@@ -46,11 +49,17 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     [self.filter addTarget:self action:@selector(filterChanged) forControlEvents:UIControlEventValueChanged];
     self.navigationItem.titleView = self.filter;
 
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
-        initWithImage:[UIImage systemImageNamed:@"gearshape"]
-                style:UIBarButtonItemStylePlain
-               target:self
-               action:@selector(openSettings)];
+    // 齿轮按钮（有新版时带一个小橙点，让用户不必主动去翻设置）
+    UIButton *gear = [UIButton buttonWithType:UIButtonTypeSystem];
+    gear.frame = CGRectMake(0, 0, 30, 30);
+    [gear setImage:[UIImage systemImageNamed:@"gearshape"] forState:UIControlStateNormal];
+    [gear addTarget:self action:@selector(openSettings) forControlEvents:UIControlEventTouchUpInside];
+    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(24, 1, 8, 8)];
+    dot.backgroundColor = [UIColor systemOrangeColor];
+    dot.layer.cornerRadius = 4;
+    dot.tag = 999;
+    [gear addSubview:dot];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:gear];
 
     self.search = [[UISearchController alloc] initWithSearchResultsController:nil];
     self.search.searchResultsUpdater = self;
@@ -67,6 +76,35 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     [self prunePendingRestart];
 }
 
+// daemon 每 12 小时查一次；App 打开时若距上次检查超过 6 小时就补一次，
+// 让"有新版本"这件事不必等周期、也不必用户主动去点检查更新。
+// 静默进行：只更新齿轮上的橙点，不弹任何东西。
+- (void)refreshLatestIfStale {
+    NSTimeInterval lastCheck = [DHReadUpdaterState()[@"lastCheck"] doubleValue];
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (lastCheck > 0 && now - lastCheck < 6 * 3600) return;
+    DHFetchLatestRelease(^(NSDictionary *_Nullable info, __unused NSError *_Nullable error) {
+        NSString *version = info[@"version"];
+        if (![version isKindOfClass:[NSString class]] || version.length == 0) return;
+        self.freshLatest = version;
+        [self refreshUpdateDot];
+    });
+}
+
+- (BOOL)hasPendingUpdate {
+    if (DHPendingUpdateVersion() != nil) return YES;
+    NSString *installed = DHReadEngineMeta()[@"version"];
+    if (self.freshLatest.length && [installed isKindOfClass:[NSString class]] && installed.length) {
+        return DHCompareVersions(installed, self.freshLatest) == NSOrderedAscending;
+    }
+    return NO;
+}
+
+- (void)refreshUpdateDot {
+    UIView *dot = [self.navigationItem.rightBarButtonItem.customView viewWithTag:999];
+    dot.hidden = ![self hasPendingUpdate];
+}
+
 - (void)openSettings {
     DHSettingsViewController *settings = [[DHSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
     [self.navigationController pushViewController:settings animated:YES];
@@ -81,10 +119,23 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 #pragma mark - 数据
 
 - (void)reload {
+    // 有新版本就在齿轮上点个橙点：用户不主动翻设置也能知道
+    [self refreshUpdateDot];
     self.allApps = DHInstalledApps();
     self.enabled = [[DHReadEnabledBundles() mutableCopy] ?: [NSMutableSet set] mutableCopy];
     [self rebuild];
     [self.tableView reloadData];
+    [self refreshInjectedStatus];
+}
+
+- (void)refreshInjectedStatus {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSDictionary *found = DHProbeInjectedApps();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.injected = found;
+            [self.tableView reloadData];
+        });
+    });
 }
 
 - (void)updateSearchResultsForSearchController:(__unused UISearchController *)controller {
@@ -217,6 +268,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     more.menu = [self menuForApp:app];               // 每次重建：菜单内容跟着状态走
 
     cell.textLabel.text = app.name;
+    BOOL on = [self.enabled containsObject:app.bundleID];
     if ([self.pendingRestart containsObject:app.bundleID]) {
         // 改了开关还没重启：直接标在这一行上，比横幅更贴身
         NSMutableAttributedString *subtitle = [[NSMutableAttributedString alloc]
@@ -224,6 +276,24 @@ typedef NS_ENUM(NSInteger, DHFilter) {
                 attributes:@{ NSForegroundColorAttributeName: [UIColor secondaryLabelColor] }];
         [subtitle appendAttributedString:[[NSAttributedString alloc]
             initWithString:@"　需重启"
+                attributes:@{ NSForegroundColorAttributeName: [UIColor systemOrangeColor] }]];
+        cell.detailTextLabel.attributedText = subtitle;
+    } else if (on && self.injected[app.bundleID]) {
+        NSNumber *port = self.injected[app.bundleID][@"port"];
+        NSMutableAttributedString *subtitle = [[NSMutableAttributedString alloc]
+            initWithString:app.bundleID
+                attributes:@{ NSForegroundColorAttributeName: [UIColor secondaryLabelColor] }];
+        NSString *mark = port ? [NSString stringWithFormat:@"　已注入 :%@", port] : @"　已注入";
+        [subtitle appendAttributedString:[[NSAttributedString alloc]
+            initWithString:mark
+                attributes:@{ NSForegroundColorAttributeName: [UIColor systemGreenColor] }]];
+        cell.detailTextLabel.attributedText = subtitle;
+    } else if (on && DHAppProcessRunning(app)) {
+        NSMutableAttributedString *subtitle = [[NSMutableAttributedString alloc]
+            initWithString:app.bundleID
+                attributes:@{ NSForegroundColorAttributeName: [UIColor secondaryLabelColor] }];
+        [subtitle appendAttributedString:[[NSAttributedString alloc]
+            initWithString:@"　未注入"
                 attributes:@{ NSForegroundColorAttributeName: [UIColor systemOrangeColor] }]];
         cell.detailTextLabel.attributedText = subtitle;
     } else {
@@ -258,11 +328,11 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     if (on) {
         [items addObject:[UIAction actionWithTitle:@"重启" image:[UIImage systemImageNamed:@"arrow.clockwise"]
                                         identifier:nil handler:^(__unused UIAction *a) {
-            [weakSelf requestRestartFor:app.bundleID];
+            [weakSelf requestRestartFor:app];
         }]];
         [items addObject:[UIAction actionWithTitle:@"停止" image:[UIImage systemImageNamed:@"stop.circle"]
                                         identifier:nil handler:^(__unused UIAction *a) {
-            [weakSelf requestStopFor:app.bundleID];
+            [weakSelf requestStopFor:app];
         }]];
     } else {
         [items addObject:[UIAction actionWithTitle:@"开启注入" image:[UIImage systemImageNamed:@"checkmark.circle"]
@@ -286,15 +356,37 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     }];
 }
 
-- (void)requestRestartFor:(NSString *)bundleID {
-    if (!DHWriteRestartRequest(bundleID)) return;
-    [self clearPendingRestart:bundleID];
-    [self watchRestartResultFor:bundleID tellOnSuccess:YES];
+- (void)requestRestartFor:(DHAppInfo *)app {
+    // rootHide 上 launchd 能拉起 daemon，但签过名的二进制对引擎目录 EPERM，
+    // 拿不到锁就退出，重启请求永远不会被处理。管理器与目标 App 同为 mobile，自己杀+打开。
+    [self clearPendingRestart:app.bundleID];
+    NSString *bundleID = app.bundleID;
+    NSString *name = app.name;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL killed = DHKillAppProcess(app);
+        if (killed) [NSThread sleepForTimeInterval:0.4];
+        BOOL relaunched = DHRelaunchApp(bundleID);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (relaunched) {
+                [self flashRestarted:name];
+                return;
+            }
+            NSString *message = killed
+                ? @"已结束它，请手动打开以让改动生效。"
+                : @"无法重启该 App。";
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil
+                message:message preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        });
+    });
 }
 
-- (void)requestStopFor:(NSString *)bundleID {
-    if (!DHWriteStopRequest(bundleID)) return;
-    [self clearPendingRestart:bundleID];
+- (void)requestStopFor:(DHAppInfo *)app {
+    [self clearPendingRestart:app.bundleID];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        DHKillAppProcess(app);
+    });
 }
 
 #pragma mark - 开关写入
@@ -302,10 +394,14 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 - (void)applyEnabled:(BOOL)on forApp:(DHAppInfo *)app revert:(void (^)(void))revert {
     NSMutableSet<NSString *> *next = [self.enabled mutableCopy];
     if (on) [next addObject:app.bundleID]; else [next removeObject:app.bundleID];
-    if (!DHWriteEnabledBundles(next)) {
+    NSError *writeErr = nil;
+    if (!DHWriteEnabledBundles(next, &writeErr)) {
         if (revert) revert();
+        NSString *detail = writeErr.localizedDescription.length
+            ? writeErr.localizedDescription : @"请确认插件已正确安装。";
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存失败"
-            message:@"写入启用名单失败。请确认插件已正确安装。" preferredStyle:UIAlertControllerStyleAlert];
+            message:[NSString stringWithFormat:@"写入启用名单失败。%@", detail]
+            preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:alert animated:YES completion:nil];
         return;
@@ -374,25 +470,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     if (changed) [self savePendingRestart];
 }
 
-- (NSString *)displayNameForBundle:(NSString *)bundleID {
-    for (DHAppInfo *app in self.allApps) {
-        if ([app.bundleID isEqualToString:bundleID]) return app.name;
-    }
-    return bundleID;
-}
-
 #pragma mark - 重启结果
-
-- (void)watchRestartResultFor:(NSString *)bundleID {
-    [self watchRestartResultFor:bundleID tellOnSuccess:NO];
-}
-
-- (void)watchRestartResultFor:(NSString *)bundleID tellOnSuccess:(BOOL)tell {
-    // 轮询必须在后台：这个方法是滑动动作/开关回调直接调的，睡在主线程会把界面冻住
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        [self pollRestartResultFor:bundleID tellOnSuccess:tell];
-    });
-}
 
 - (void)flashRestarted:(NSString *)name {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil
@@ -401,30 +479,6 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     [self presentViewController:alert animated:YES completion:nil];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ [alert dismissViewControllerAnimated:YES completion:nil]; });
-}
-
-- (void)pollRestartResultFor:(NSString *)bundleID tellOnSuccess:(BOOL)tell {
-    for (int i = 0; i < 12; i++) {
-        [NSThread sleepForTimeInterval:0.5];
-        NSDictionary *op = DHReadUpdaterState()[@"lastOp"];
-        if (![op isKindOfClass:[NSDictionary class]]) continue;
-        if (![op[@"bundle"] isEqualToString:bundleID]) continue;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if ([op[@"relaunched"] boolValue]) {
-                // 已自动打开；只有开关触发的才给一条会自己消失的提示，滑动的不用
-                if (tell) [self flashRestarted:bundleID];
-                return;
-            }
-            NSString *message = [op[@"result"] isEqualToString:@"skipped"]
-                ? @"该 App 当前没有在运行。"
-                : @"已结束它，请手动打开以让改动生效。";
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil
-                message:message preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-            [self presentViewController:alert animated:YES completion:nil];
-        });
-        return;
-    }
 }
 
 @end
