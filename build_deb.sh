@@ -67,6 +67,7 @@ APP_INFO="$SCRIPT_DIR/app/Info.plist"
 APP_ENTITLEMENTS="$SCRIPT_DIR/app/entitlements.plist"
 DAEMON_SRC="$SCRIPT_DIR/daemon/main.m"
 DAEMON_PLIST_TMPL="$SCRIPT_DIR/daemon/com.iosdecrypthub.updated.plist"
+REPO_KEY="$SCRIPT_DIR/repo/iosdecrypthub-archive-keyring.gpg"
 APP_NAME="IOSDecryptHubManager"
 DAEMON_BIN="IOSDecryptHubUpdated"
 
@@ -175,6 +176,7 @@ build_variant() {
     mkdir -p "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub"
     mkdir -p "$STAGE/${PREFIX}/Applications/$APP_NAME.app"
     mkdir -p "$STAGE/${PREFIX}/Library/LaunchDaemons"
+    mkdir -p "$STAGE/${PREFIX}/etc/apt/trusted.gpg.d"
 
     cat > "$STAGE/DEBIAN/control" << CTRL
 Package: ${PKG_NAME}
@@ -196,6 +198,11 @@ CTRL
     cp "$SCRIPT_DIR/enabledBundles.default.plist" \
         "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/enabledBundles.default.plist"
     cp "$DAEMON_OUT" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN"
+
+    # 仓库公钥装进 APT 信任链：不然现代 APT 会因 Release 未受信任而报 E:
+    # （"is not signed"）并拒绝更新索引 —— 用户就永远看不到新版本。
+    [ -f "$REPO_KEY" ] || error "缺少仓库公钥: $REPO_KEY"
+    cp "$REPO_KEY" "$STAGE/${PREFIX}/etc/apt/trusted.gpg.d/iosdecrypthub.gpg"
 
     cat > "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/version.plist" << VP
 <?xml version="1.0" encoding="UTF-8"?>
@@ -400,6 +407,11 @@ POSTRM
     case "$PACKAGE_CONTENTS" in
         *"/usr/lib/IOSDecryptHub/version.plist"*) ;;
         *) error "$VARIANT 缺少引擎版本文件" ;;
+    esac
+
+    case "$PACKAGE_CONTENTS" in
+        *"/etc/apt/trusted.gpg.d/iosdecrypthub.gpg"*) ;;
+        *) error "$VARIANT 缺少仓库公钥（APT 会拒绝更新索引）" ;;
     esac
 
     grep -q '<string>com.apple.UIKit</string>' \
