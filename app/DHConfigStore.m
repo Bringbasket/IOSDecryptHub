@@ -67,9 +67,16 @@ BOOL DHWriteEnabledBundles(NSSet<NSString *> *bundleIDs) {
     NSString *path = dh_config_path();
     if (!path) return NO;
     NSArray *values = [[bundleIDs allObjects] sortedArrayUsingSelector:@selector(compare:)];
+    NSDictionary *domain = @{DH_KEY_BUNDLES: values};
+
     @try {
         // loader 认这个文件：权威写入
-        if (![@{DH_KEY_BUNDLES: values} writeToFile:path atomically:YES]) return NO;
+        if (![domain writeToFile:path atomically:YES]) return NO;
+    } @catch (__unused NSException *e) {
+        return NO;
+    }
+
+    @try {
         // cfprefs 同步一份，兼容旧读取路径；失败不影响结果
         CFPreferencesSetValue((__bridge CFStringRef)DH_KEY_BUNDLES,
             (__bridge CFPropertyListRef)values,
@@ -77,10 +84,10 @@ BOOL DHWriteEnabledBundles(NSSet<NSString *> *bundleIDs) {
             kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
         CFPreferencesSynchronize((__bridge CFStringRef)DH_DOMAIN_LOADER,
             kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
-        return YES;
     } @catch (__unused NSException *e) {
-        return NO;
+        // 部分越狱环境不支持对 AnyHost 写入 CFPreferences；文件已经写成功即可。
     }
+    return YES;
 }
 
 NSDictionary *DHReadEngineMeta(void) {

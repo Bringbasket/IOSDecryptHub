@@ -1,0 +1,68 @@
+name: Build jailbreak packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Package target
+        required: true
+        default: roothide
+        type: choice
+        options:
+          - all
+          - rootless
+          - roothide
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install build dependencies
+        run: |
+          brew install dpkg ldid
+          xcrun --sdk iphoneos --show-sdk-path
+          dpkg-deb --version
+          ldid -h >/dev/null 2>&1 || true
+
+      - name: Build packages
+        shell: bash
+        env:
+          DISPATCH_TARGET: ${{ inputs.target || 'all' }}
+        run: |
+          set -euo pipefail
+          case "$DISPATCH_TARGET" in
+            all) make deb ;;
+            rootless) make deb-rootless ;;
+            roothide) make deb-roothide ;;
+            *) echo "Unsupported target: $DISPATCH_TARGET" >&2; exit 1 ;;
+          esac
+
+      - name: List packages
+        run: |
+          set -euo pipefail
+          find build/deb -maxdepth 1 -type f -name '*.deb' -print
+          test -n "$(find build/deb -maxdepth 1 -type f -name '*.deb' -print -quit)"
+
+      - name: Upload Debian packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: iosdecrypthub-deb-${{ github.run_id }}
+          path: build/deb/*.deb
+          if-no-files-found: error
+          retention-days: 14
