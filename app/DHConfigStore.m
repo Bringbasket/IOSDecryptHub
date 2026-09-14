@@ -43,7 +43,8 @@ static NSString *_Nullable dh_config_path(void) {
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
     NSString *root = DHBootstrapRoot();
     if (root) {
-        [paths addObject:[root stringByAppendingPathComponent:DH_CONFIG_REL]];
+        NSString *configRel = [@"usr/lib" stringByAppendingPathComponent:DH_CONFIG_REL];
+        [paths addObject:[root stringByAppendingPathComponent:configRel]];
     }
     [paths addObject:@"/var/jb/usr/lib/IOSDecryptHub/config/enabledBundles.plist"];
     NSFileManager *fm = [NSFileManager defaultManager];
