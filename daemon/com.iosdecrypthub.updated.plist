@@ -8,6 +8,8 @@
     <array>
         <string>@PREFIX@/usr/lib/IOSDecryptHub/IOSDecryptHubUpdated</string>
     </array>
+    <key>UserName</key>
+    <string>root</string>
     <key>WatchPaths</key>
     <array>
         <string>/var/mobile/Library/Preferences/com.iosdecrypthub.updater.request.plist</string>

@@ -422,6 +422,13 @@ POSTRM
         "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist" \
         || error "$VARIANT 的 daemon 启动配置 Label 错误"
 
+    grep -A1 -q '<key>UserName</key>.*' \
+        "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist" \
+        || error "$VARIANT 的 daemon 启动配置缺少 root 身份"
+    grep -q '<string>root</string>' \
+        "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist" \
+        || error "$VARIANT 的 daemon 未配置为 root 身份"
+
     grep -q "<string>${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN</string>" \
         "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist" \
         || error "$VARIANT 的 daemon 可执行路径与前缀不一致"

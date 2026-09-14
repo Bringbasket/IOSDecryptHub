@@ -1,15 +1,15 @@
 // dh_shared.h — 管理器 App 与 updater daemon 的共享约定
 //
 // 单一事实源（两边只认这些路径与键，不各自发明）：
-//   名单: <bootstrap>/usr/lib/IOSDecryptHub/config/enabledBundles.plist  (mobile 可写)
+//   名单: <bootstrap>/usr/lib/IOSDecryptHub/config/enabledBundles.plist  (updater 写)
 //   引擎: <bootstrap>/usr/lib/IOSDecryptHub/decrypt_helper.dylib         (root 专属，daemon 写)
 //   元信息: <bootstrap>/usr/lib/IOSDecryptHub/version.plist              {version, variant, arch}
 //   状态: <bootstrap>/usr/lib/IOSDecryptHub/state.plist                  (daemon 写 0644，App 只读)
 //   请求: /var/mobile/Library/Preferences/com.iosdecrypthub.updater.request.plist
 //         (mobile 可写，daemon 读；launchd 用 WatchPaths 监听它；内容不可信，
-//          daemon 只取 action 与可选的 version —— 下载地址一律自己按发布命名约定
+//          daemon 只接受约定字段 —— 下载地址一律自己按发布命名约定
 //          推导，绝不采用请求里的地址)
-//         action: check / install / rollback / restart / stop / none
+//         action: check / install / rollback / restart / stop / set-enabled / none
 //         version: 可选，指定要安装的版本（历史版本），如 "1.25.1"
 //         bundle:  可选，restart / stop 要操作的 App（bundle id）
 //                  restart = 结束进程并尽量重新打开；stop = 只结束进程
@@ -40,4 +40,5 @@
 #define DH_REQ_ROLLBACK   @"rollback"
 #define DH_REQ_RESTART    @"restart"
 #define DH_REQ_STOP       @"stop"
+#define DH_REQ_SET_ENABLED @"set-enabled"
 #define DH_REQ_NONE       @"none"

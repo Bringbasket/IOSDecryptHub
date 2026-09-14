@@ -103,6 +103,9 @@ request(){ write_plist "${REQUEST}" "<dict><key>action</key><string>$1</string><
 request_version(){ # request_version <action> <version>
     write_plist "${REQUEST}" "<dict><key>action</key><string>$1</string><key>version</key><string>$2</string></dict>"
 }
+request_enabled(){
+    write_plist "${REQUEST}" '<dict><key>action</key><string>set-enabled</string><key>enabledBundles</key><array><string>com.sim.z</string><string>com.sim.a</string><string>com.sim.a</string></array></dict>'
+}
 
 echo "[build] 编译 macOS 版 daemon（按真机布局放进仿真 bootstrap）"
 build_daemon "${ENGINE_DIR}/daemon" || { echo "daemon 编译失败"; exit 2; }
@@ -366,6 +369,17 @@ eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:kind)" "stop" "记录的动�
 eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:result)" "ok" "结果 ok"
 eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:relaunched)" "" "stop 不写 relaunched（没重开）"
 kill -9 "${VICTIM_PID}" 2>/dev/null; VICTIM_PID=""
+
+echo
+echo "--- T13 updater 代写启用名单（排序并去重）"
+reset_env "${LATEST_TAG#v}"
+request_enabled
+"${DAEMON}"
+eq "$(plist_get "${ENGINE_DIR}/config/enabledBundles.plist" enabledBundles:0)" "com.sim.a" "名单按 bundle id 排序"
+eq "$(plist_get "${ENGINE_DIR}/config/enabledBundles.plist" enabledBundles:1)" "com.sim.z" "重复 bundle id 被去除"
+eq "$(plist_get "${ENGINE_DIR}/config/enabledBundles.plist" enabledBundles:2)" "" "名单只有两项"
+eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:kind)" "set-enabled" "state 记录名单写入"
+eq "$(plist_get "${ENGINE_DIR}/state.plist" lastOp:result)" "ok" "名单写入结果 ok"
 
 echo
 printf 'updater 仿真结果: PASS=%d FAIL=%d\n' "${PASS}" "${FAIL}"

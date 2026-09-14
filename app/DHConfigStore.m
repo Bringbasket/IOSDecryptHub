@@ -54,6 +54,29 @@ static NSString *_Nullable dh_config_path(void) {
     return paths.firstObject;
 }
 
+// roothide 会给 App 提供独立的绝对路径视图。直接写 /var/mobile/... 虽然返回成功，
+// launchd 却看不到；从 App 自身路径反推 bootstrap 后再拼接，才能落到共享命名空间。
+static NSArray<NSString *> *dh_request_path_candidates(void) {
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    NSString *root = DHBootstrapRoot();
+    if (root) {
+        [paths addObject:[root stringByAppendingPathComponent:
+            @"var/mobile/Library/Preferences/com.iosdecrypthub.updater.request.plist"]];
+    }
+    [paths addObject:DH_REQUEST_PATH];
+    return paths;
+}
+
+static BOOL dh_write_request(NSDictionary *request) {
+    for (NSString *path in dh_request_path_candidates()) {
+        @try {
+            if ([request writeToFile:path atomically:YES]) return YES;
+        } @catch (__unused NSException *e) {
+        }
+    }
+    return NO;
+}
+
 NSSet<NSString *> *DHReadEnabledBundles(void) {
     @try {
         NSDictionary *domain = [NSDictionary dictionaryWithContentsOfFile:dh_config_path()];
@@ -70,12 +93,21 @@ BOOL DHWriteEnabledBundles(NSSet<NSString *> *bundleIDs) {
     NSArray *values = [[bundleIDs allObjects] sortedArrayUsingSelector:@selector(compare:)];
     NSDictionary *domain = @{DH_KEY_BUNDLES: values};
 
+    BOOL written = NO;
     @try {
-        // loader 认这个文件：权威写入
-        if (![domain writeToFile:path atomically:YES]) return NO;
+        // rootless 等允许直接写的环境保留最快路径。
+        written = [domain writeToFile:path atomically:YES];
     } @catch (__unused NSException *e) {
-        return NO;
     }
+    if (!written) {
+        // roothide 的 App 进程会被 MAC 拒绝写 bootstrap/usr/lib；交给按需 updater 代写。
+        written = dh_write_request(@{
+            @"action": DH_REQ_SET_ENABLED,
+            DH_KEY_BUNDLES: values,
+            @"time": @([[NSDate date] timeIntervalSince1970]),
+        });
+    }
+    if (!written) return NO;
 
     @try {
         // cfprefs 同步一份，兼容旧读取路径；失败不影响结果
@@ -120,12 +152,7 @@ BOOL DHWriteUpdateRequest(NSString *action, NSString *_Nullable version) {
     request[@"action"] = action ?: DH_REQ_NONE;
     request[@"time"] = @([[NSDate date] timeIntervalSince1970]);
     if (version.length) request[@"version"] = version;   // 指定版本安装（历史版本）
-    NSDictionary *req = request;
-    @try {
-        return [req writeToFile:DH_REQUEST_PATH atomically:YES];
-    } @catch (__unused NSException *e) {
-        return NO;
-    }
+    return dh_write_request(request);
 }
 
 static NSString *dh_strip_v(NSString *s) {
@@ -207,11 +234,7 @@ BOOL DHWriteRestartRequest(NSString *bundleID) {
         @"bundle": bundleID,
         @"time": @([[NSDate date] timeIntervalSince1970]),
     };
-    @try {
-        return [req writeToFile:DH_REQUEST_PATH atomically:YES];
-    } @catch (__unused NSException *e) {
-        return NO;
-    }
+    return dh_write_request(req);
 }
 
 BOOL DHWriteStopRequest(NSString *bundleID) {
@@ -221,11 +244,7 @@ BOOL DHWriteStopRequest(NSString *bundleID) {
         @"bundle": bundleID,
         @"time": @([[NSDate date] timeIntervalSince1970]),
     };
-    @try {
-        return [req writeToFile:DH_REQUEST_PATH atomically:YES];
-    } @catch (__unused NSException *e) {
-        return NO;
-    }
+    return dh_write_request(req);
 }
 
 #pragma mark - 历史版本

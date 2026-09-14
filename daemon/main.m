@@ -752,12 +752,49 @@ static void dh_do_rollback(void) {
 
 #pragma mark - 请求处理
 
+static BOOL dh_write_request_plist(NSDictionary *request) {
+    if (!dh_write_plist(request, DH_REQUEST_PATH)) return NO;
+    // daemon 以 root 运行；原子 rename 后新 inode 会继承 root 身份，必须还给管理器。
+    chown(DH_REQUEST_PATH.fileSystemRepresentation, 501, 501);
+    chmod(DH_REQUEST_PATH.fileSystemRepresentation, 0644);
+    return YES;
+}
+
+static void dh_do_set_enabled(id rawBundles) {
+    if (![rawBundles isKindOfClass:[NSArray class]] || [(NSArray *)rawBundles count] > 4096) {
+        dh_record_op(DH_REQ_SET_ENABLED, nil, @"error", @"启用名单格式无效", nil);
+        dh_log("启用名单格式无效，拒绝写入");
+        return;
+    }
+
+    NSMutableSet<NSString *> *unique = [NSMutableSet set];
+    for (id item in (NSArray *)rawBundles) {
+        if (![item isKindOfClass:[NSString class]] || [(NSString *)item length] == 0 ||
+            [(NSString *)item length] > 255) {
+            dh_record_op(DH_REQ_SET_ENABLED, nil, @"error", @"启用名单包含无效 bundle id", nil);
+            dh_log("启用名单包含无效 bundle id，拒绝写入");
+            return;
+        }
+        [unique addObject:item];
+    }
+
+    NSArray<NSString *> *values = [[unique allObjects] sortedArrayUsingSelector:@selector(compare:)];
+    NSString *path = [g_engine_dir stringByAppendingPathComponent:@"config/enabledBundles.plist"];
+    if (!dh_write_plist(@{DH_KEY_BUNDLES: values}, path)) {
+        dh_record_op(DH_REQ_SET_ENABLED, nil, @"error", @"写入启用名单失败", nil);
+        dh_log("写入启用名单失败: %s", path.UTF8String);
+        return;
+    }
+    chown(path.fileSystemRepresentation, 501, 501);
+    chmod(path.fileSystemRepresentation, 0644);
+    dh_record_op(DH_REQ_SET_ENABLED, nil, @"ok", nil, nil);
+    dh_log("启用名单已保存，共 %lu 项", (unsigned long)values.count);
+}
+
 static void dh_ensure_request_file(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     if ([fm fileExistsAtPath:DH_REQUEST_PATH]) return;
-    dh_write_plist(@{@"action": DH_REQ_NONE}, DH_REQUEST_PATH);
-    chown(DH_REQUEST_PATH.fileSystemRepresentation, 501, 501); // mobile
-    chmod(DH_REQUEST_PATH.fileSystemRepresentation, 0644);
+    dh_write_request_plist(@{@"action": DH_REQ_NONE});
 }
 
 static void dh_process_request(void) {
@@ -769,7 +806,7 @@ static void dh_process_request(void) {
     }
     // 先清零再执行：本次写入会再次触发 WatchPaths，但下次进来 action=none 直接返回，不会循环
     req[@"action"] = DH_REQ_NONE;
-    dh_write_plist(req, DH_REQUEST_PATH);
+    dh_write_request_plist(req);
     dh_log("处理请求: %s", action.UTF8String);
     if ([action isEqualToString:DH_REQ_CHECK]) {
         dh_do_check();
@@ -785,12 +822,14 @@ static void dh_process_request(void) {
     } else if ([action isEqualToString:DH_REQ_STOP]) {
         id bundle = req[@"bundle"];
         dh_do_stop([bundle isKindOfClass:[NSString class]] ? bundle : nil);
+    } else if ([action isEqualToString:DH_REQ_SET_ENABLED]) {
+        dh_do_set_enabled(req[DH_KEY_BUNDLES]);
     } else {
         dh_log("未知请求: %s，已忽略", action.UTF8String);
     }
     req[@"lastAction"] = action;
     req[@"time"] = @([[NSDate date] timeIntervalSince1970]);
-    dh_write_plist(req, DH_REQUEST_PATH);
+    dh_write_request_plist(req);
 }
 
 static void dh_periodic_check(void) {
