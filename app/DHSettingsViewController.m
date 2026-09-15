@@ -41,6 +41,8 @@ static CGFloat dh_follow_aspect(void) {
 @property (nonatomic, copy) NSDictionary *updaterState;
 @property (nonatomic, copy, nullable) NSString *latestVersion;   // 仅"发现新版本"时用于展示
 @property (nonatomic, assign) BOOL working;
+@property (nonatomic, copy, nullable) NSString *installingVersion;
+@property (nonatomic, assign) NSTimeInterval installRequestTime;
 @property (nonatomic, strong) UIImageView *followView;
 @property (nonatomic, assign) BOOL hasUpdateRow;
 @end
@@ -60,7 +62,7 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
     __unused void *observer, __unused CFStringRef name,
     __unused const void *object, __unused CFDictionaryRef info) {
     DHSettingsViewController *vc = (__bridge DHSettingsViewController *)observer;
-    dispatch_async(dispatch_get_main_queue(), ^{ [vc reload]; });
+    dispatch_async(dispatch_get_main_queue(), ^{ [vc handleUpdaterStateChanged]; });
 }
 
 - (void)dealloc {
@@ -92,14 +94,14 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 - (NSInteger)tableView:(__unused UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case DHSectionUpdate: return self.hasUpdateRow ? 3 : 2;   // 检查更新 /[安装新版本]/ 历史版本
-        case DHSectionAbout:  return 2 + (NSInteger)dh_social_rows().count;   // 公众号 + 社群 + 版本
+        case DHSectionAbout:  return 3 + (NSInteger)dh_social_rows().count;   // 公众号 + 社群 + App/引擎版本
         default: return 0;
     }
 }
 
 - (NSString *)tableView:(__unused UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
-        case DHSectionUpdate: return @"软件更新";
+        case DHSectionUpdate: return @"引擎更新";
         case DHSectionAbout:  return @"关于";
         default: return nil;
     }
@@ -107,6 +109,11 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 
 - (NSString *)tableView:(__unused UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section != DHSectionUpdate) return nil;
+    if (self.working) {
+        return self.installingVersion.length
+            ? [NSString stringWithFormat:@"正在安装引擎 %@…", self.installingVersion]
+            : @"正在检查更新…";
+    }
     NSDictionary *last = self.updaterState[@"lastOp"];
     NSString *result = [last isKindOfClass:[NSDictionary class]] ? last[@"result"] : nil;
     if ([result isEqualToString:@"error"]) {
@@ -115,7 +122,6 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
             ? [NSString stringWithFormat:@"上次更新失败：%@（已保留原版本）", reason]
             : @"上次更新失败，已保留原版本。";
     }
-    if (self.working) return @"正在检查更新…";
     // 有新版就在这里点出来（全 App 唯一一处按需出现的版本号）
     if (self.hasUpdateRow && self.latestVersion.length) {
         return [NSString stringWithFormat:@"发现新版本 %@，点上方安装。", self.latestVersion];
@@ -139,11 +145,14 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == DHSectionUpdate) {
-        if (indexPath.row == 0) return [self actionCell:@"检查更新" image:nil enabled:!self.working];
+        if (indexPath.row == 0) return [self actionCell:@"检查引擎更新" image:nil enabled:!self.working];
         if (self.hasUpdateRow && indexPath.row == 1) {
-            return [self actionCell:@"安装新版本" image:nil enabled:!self.working];
+            NSString *title = self.latestVersion.length
+                ? [NSString stringWithFormat:@"安装引擎 %@", self.latestVersion]
+                : @"安装新引擎";
+            return [self actionCell:title image:nil enabled:!self.working];
         }
-        return [self actionCell:@"历史版本" image:nil enabled:!self.working];
+        return [self actionCell:@"引擎历史版本" image:nil enabled:!self.working];
     }
     if (indexPath.row == 0) {   // 公众号：整行图，点一下复制账号名
         UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"follow"];
@@ -173,10 +182,17 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
-    NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
-    cell.textLabel.text = @"版本";
-    cell.detailTextLabel.text = [version isKindOfClass:[NSString class]] ? version : @"—";
+    NSInteger appVersionRow = 1 + (NSInteger)social.count;
+    if (indexPath.row == appVersionRow) {
+        NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+        cell.textLabel.text = @"管理器版本";
+        cell.detailTextLabel.text = [version isKindOfClass:[NSString class]] ? version : @"—";
+    } else {
+        NSString *version = DHReadEngineMeta()[@"version"];
+        cell.textLabel.text = @"引擎版本";
+        cell.detailTextLabel.text = [version isKindOfClass:[NSString class]] ? version : @"—";
+    }
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     return cell;
 }
@@ -237,21 +253,38 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 - (void)checkUpdate {
     [self setWorking:YES];
     DHFetchLatestRelease(^(NSDictionary *_Nullable info, NSError *_Nullable error) {
-        [self setWorking:NO];
-        self.latestVersion = nil;
-        [self reload];
+        self.working = NO;
+        self.updaterState = DHReadUpdaterState();
         if (error) {
+            self.latestVersion = nil;
+            self.hasUpdateRow = NO;
+            [self.tableView reloadData];
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"检查失败"
                 message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
             [self presentViewController:alert animated:YES completion:nil];
             return;
         }
-        [self refreshAvailability];
+        NSString *latest = info[@"version"];
+        NSString *installed = DHReadEngineMeta()[@"version"];
+        BOOL available = [latest isKindOfClass:[NSString class]] && latest.length &&
+            [installed isKindOfClass:[NSString class]] && installed.length &&
+            DHCompareVersions(installed, latest) == NSOrderedAscending;
+        self.latestVersion = available ? latest : nil;
+        self.hasUpdateRow = available;
         [self.tableView reloadData];
-        if (!self.hasUpdateRow) {
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已是最新"
-                message:nil preferredStyle:UIAlertControllerStyleAlert];
+        if (!available) {
+            NSString *appVersion = [[NSBundle mainBundle]
+                objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+            BOOL appBehind = [appVersion isKindOfClass:[NSString class]] && latest.length &&
+                DHCompareVersions(appVersion, latest) == NSOrderedAscending;
+            NSString *message = appBehind
+                ? [NSString stringWithFormat:
+                    @"运行时引擎已是最新；管理器 App 仍为 %@。界面和后台服务需安装完整 DEB 才能更新。",
+                    appVersion]
+                : nil;
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"引擎已是最新"
+                message:message preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
             [self presentViewController:alert animated:YES completion:nil];
         }
@@ -263,14 +296,17 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
     NSString *message = version.length
         ? [NSString stringWithFormat:@"将在后台安装 %@。已启用的 App 会被自动重启，无需手动操作。", version]
         : @"将在后台安装新版本。已启用的 App 会被自动重启，无需手动操作。";
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"安装新版本"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"安装新引擎"
         message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"安装" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *a) {
+        self.installingVersion = version.length ? version : @"最新版";
+        self.installRequestTime = [[NSDate date] timeIntervalSince1970];
         if (DHWriteUpdateRequest(DH_REQ_INSTALL, nil)) {
-            self.hasUpdateRow = NO;
-            [self.tableView reloadData];
+            [self setWorking:YES];
+            [self scheduleInstallPoll];
         } else {
+            self.installingVersion = nil;
             UIAlertController *fail = [UIAlertController alertControllerWithTitle:@"提交失败"
                 message:@"请确认插件已正确安装。" preferredStyle:UIAlertControllerStyleAlert];
             [fail addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
@@ -278,6 +314,65 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
         }
     }]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)handleUpdaterStateChanged {
+    self.updaterState = DHReadUpdaterState();
+    if (![self finishInstallIfReady]) {
+        [self refreshAvailability];
+        [self.tableView reloadData];
+    }
+}
+
+- (BOOL)finishInstallIfReady {
+    if (!self.installingVersion.length) return NO;
+    NSDictionary *op = self.updaterState[@"lastOp"];
+    if (![op isKindOfClass:[NSDictionary class]] ||
+        ![op[@"kind"] isEqualToString:@"install"] ||
+        [op[@"time"] doubleValue] + 0.5 < self.installRequestTime) return NO;
+
+    NSString *result = op[@"result"];
+    NSString *error = op[@"error"];
+    NSString *version = op[@"version"];
+    self.installingVersion = nil;
+    self.working = NO;
+    self.latestVersion = nil;
+    self.hasUpdateRow = NO;
+
+    BOOL ok = [result isEqualToString:@"ok"];
+    NSString *title = ok ? @"引擎安装完成"
+        : ([result isEqualToString:@"skipped"] ? @"无需安装" : @"引擎安装失败");
+    NSString *message = error.length ? error
+        : (version.length ? [NSString stringWithFormat:@"当前引擎版本：%@", version] : nil);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self reload];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+            message:message preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    });
+    return YES;
+}
+
+- (void)scheduleInstallPoll {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!self.installingVersion.length) return;
+        self.updaterState = DHReadUpdaterState();
+        if ([self finishInstallIfReady]) return;
+        if ([[NSDate date] timeIntervalSince1970] - self.installRequestTime > 150) {
+            self.installingVersion = nil;
+            [self setWorking:NO];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"安装未响应"
+                message:@"后台更新器没有返回结果，请重新安装完整 DEB 以修复更新服务。"
+                preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        [self scheduleInstallPoll];
+    });
 }
 
 @end

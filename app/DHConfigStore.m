@@ -111,20 +111,28 @@ static BOOL dh_try_write_jb_config(NSData *data) {
     return YES;
 }
 
+// launchd 的 WatchPaths 需要观察到现有 inode 的写入。NSDictionary 的 atomically:YES
+// 会用 rename 替换文件，在部分越狱环境会偶发漏掉事件，表现为点安装后完全没反应。
+static BOOL dh_write_request_dict(NSDictionary *request) {
+    NSError *error = nil;
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:request ?: @{}
+        format:NSPropertyListXMLFormat_v1_0 options:0 error:&error];
+    if (!data || ![data writeToFile:DH_REQUEST_PATH options:0 error:&error]) return NO;
+    [[NSFileManager defaultManager] setAttributes:@{
+        NSFilePosixPermissions: @0644,
+        NSFileProtectionKey: NSFileProtectionNone,
+    } ofItemAtPath:DH_REQUEST_PATH error:nil];
+    return YES;
+}
+
 static void dh_request_set_enabled(NSArray<NSString *> *values) {
     NSDictionary *req = @{
         @"action": DH_REQ_SET_ENABLED,
         DH_KEY_BUNDLES: values ?: @[],
         @"time": @([[NSDate date] timeIntervalSince1970]),
     };
-    @try {
-        [req writeToFile:DH_REQUEST_PATH atomically:YES];
-        [[NSFileManager defaultManager] setAttributes:@{
-            NSFilePosixPermissions: @0644,
-            NSFileProtectionKey: NSFileProtectionNone,
-        } ofItemAtPath:DH_REQUEST_PATH error:nil];
-    } @catch (__unused NSException *e) {
-    }
+    @try { (void)dh_write_request_dict(req); }
+    @catch (__unused NSException *e) {}
 }
 
 BOOL DHWriteEnabledBundles(NSSet<NSString *> *bundleIDs, NSError **outError) {
@@ -242,12 +250,8 @@ BOOL DHWriteUpdateRequest(NSString *action, NSString *_Nullable version) {
     request[@"action"] = action ?: DH_REQ_NONE;
     request[@"time"] = @([[NSDate date] timeIntervalSince1970]);
     if (version.length) request[@"version"] = version;   // 指定版本安装（历史版本）
-    NSDictionary *req = request;
-    @try {
-        return [req writeToFile:DH_REQUEST_PATH atomically:YES];
-    } @catch (__unused NSException *e) {
-        return NO;
-    }
+    @try { return dh_write_request_dict(request); }
+    @catch (__unused NSException *e) { return NO; }
 }
 
 static NSString *dh_strip_v(NSString *s) {
@@ -329,11 +333,8 @@ BOOL DHWriteRestartRequest(NSString *bundleID) {
         @"bundle": bundleID,
         @"time": @([[NSDate date] timeIntervalSince1970]),
     };
-    @try {
-        return [req writeToFile:DH_REQUEST_PATH atomically:YES];
-    } @catch (__unused NSException *e) {
-        return NO;
-    }
+    @try { return dh_write_request_dict(req); }
+    @catch (__unused NSException *e) { return NO; }
 }
 
 NSString *_Nullable DHPendingUpdateVersion(void) {
@@ -357,11 +358,8 @@ BOOL DHWriteStopRequest(NSString *bundleID) {
         @"bundle": bundleID,
         @"time": @([[NSDate date] timeIntervalSince1970]),
     };
-    @try {
-        return [req writeToFile:DH_REQUEST_PATH atomically:YES];
-    } @catch (__unused NSException *e) {
-        return NO;
-    }
+    @try { return dh_write_request_dict(req); }
+    @catch (__unused NSException *e) { return NO; }
 }
 
 #pragma mark - 历史版本
