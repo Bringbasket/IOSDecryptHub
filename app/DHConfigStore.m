@@ -16,7 +16,9 @@ NSString *_Nullable DHBootstrapRoot(void) {
     for (int i = 0; i < 3; i++) {
         root = [root stringByDeletingLastPathComponent];
     }
-    if (root.length <= 1) return nil;
+    // "/" 是合法 jbroot（rootHide 在 SSH 视角下 jbroot=/）。
+    // 真机 App 里 dladdr 通常是 .jbroot-XXXX，长度 > 1；两种都要认。
+    if (root.length == 0) return nil;
     return root;
 }
 
@@ -40,87 +42,122 @@ static NSString *_Nullable dh_existing_engine_dir(void) {
 }
 
 static NSString *_Nullable dh_config_path(void) {
+    // 以引擎目录为准：插件装上后目录一定在，名单文件可能还没建。
+    // 旧逻辑要求 plist 已存在，且相对路径少了 usr/lib/，roothide 上 /var/jb
+    // 又不存在，于是写到 <jbroot>/IOSDecryptHub/config/（父目录不存在）并失败。
+    NSString *dir = dh_existing_engine_dir();
+    if (dir) {
+        return [dir stringByAppendingPathComponent:@"config/enabledBundles.plist"];
+    }
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
     NSString *root = DHBootstrapRoot();
     if (root) {
-        NSString *configRel = [@"usr/lib" stringByAppendingPathComponent:DH_CONFIG_REL];
-        [paths addObject:[root stringByAppendingPathComponent:configRel]];
+        [paths addObject:[root stringByAppendingPathComponent:DH_CONFIG_REL]];
     }
     [paths addObject:@"/var/jb/usr/lib/IOSDecryptHub/config/enabledBundles.plist"];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    for (NSString *path in paths) {
-        if ([fm fileExistsAtPath:path]) return path;
-    }
     return paths.firstObject;
 }
 
-// roothide 会给 App 提供独立的绝对路径视图。直接写 /var/mobile/... 虽然返回成功，
-// launchd 却看不到；从 App 自身路径反推 bootstrap 后再拼接，才能落到共享命名空间。
-static NSArray<NSString *> *dh_request_path_candidates(void) {
-    NSMutableArray<NSString *> *paths = [NSMutableArray array];
-    NSString *root = DHBootstrapRoot();
-    if (root) {
-        [paths addObject:[root stringByAppendingPathComponent:
-            @"var/mobile/Library/Preferences/com.iosdecrypthub.updater.request.plist"]];
-    }
-    [paths addObject:DH_REQUEST_PATH];
-    return paths;
-}
-
-static BOOL dh_write_request(NSDictionary *request) {
-    for (NSString *path in dh_request_path_candidates()) {
-        @try {
-            if ([request writeToFile:path atomically:YES]) return YES;
-        } @catch (__unused NSException *e) {
-        }
-    }
-    return NO;
+static NSSet<NSString *> *_Nullable dh_bundles_from_dict(NSDictionary *domain) {
+    id value = domain[DH_KEY_BUNDLES];
+    if ([value isKindOfClass:[NSArray class]]) return [NSSet setWithArray:value];
+    return nil;
 }
 
 NSSet<NSString *> *DHReadEnabledBundles(void) {
     @try {
-        NSDictionary *domain = [NSDictionary dictionaryWithContentsOfFile:dh_config_path()];
-        id value = domain[DH_KEY_BUNDLES];
+        NSSet *fromPrefs = dh_bundles_from_dict(
+            [NSDictionary dictionaryWithContentsOfFile:DH_LOADER_PREFS]);
+        if (fromPrefs) return fromPrefs;
+
+        CFPreferencesAppSynchronize((__bridge CFStringRef)DH_DOMAIN_LOADER);
+        CFPropertyListRef raw = CFPreferencesCopyAppValue(
+            (__bridge CFStringRef)DH_KEY_BUNDLES,
+            (__bridge CFStringRef)DH_DOMAIN_LOADER);
+        id value = CFBridgingRelease(raw);
         if ([value isKindOfClass:[NSArray class]]) return [NSSet setWithArray:value];
+
+        NSSet *fromJb = dh_bundles_from_dict(
+            [NSDictionary dictionaryWithContentsOfFile:dh_config_path()]);
+        if (fromJb) return fromJb;
     } @catch (__unused NSException *e) {
     }
     return [NSSet set];
 }
 
-BOOL DHWriteEnabledBundles(NSSet<NSString *> *bundleIDs) {
+static void dh_sync_cfprefs(NSArray<NSString *> *values) {
+    CFPreferencesSetValue((__bridge CFStringRef)DH_KEY_BUNDLES,
+        (__bridge CFPropertyListRef)values,
+        (__bridge CFStringRef)DH_DOMAIN_LOADER,
+        kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    CFPreferencesSynchronize((__bridge CFStringRef)DH_DOMAIN_LOADER,
+        kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+}
+
+static BOOL dh_try_write_jb_config(NSData *data) {
     NSString *path = dh_config_path();
-    if (!path) return NO;
-    NSArray *values = [[bundleIDs allObjects] sortedArrayUsingSelector:@selector(compare:)];
-    NSDictionary *domain = @{DH_KEY_BUNDLES: values};
-
-    BOOL written = NO;
-    @try {
-        // rootless 等允许直接写的环境保留最快路径。
-        written = [domain writeToFile:path atomically:YES];
-    } @catch (__unused NSException *e) {
-    }
-    if (!written) {
-        // roothide 的 App 进程会被 MAC 拒绝写 bootstrap/usr/lib；交给按需 updater 代写。
-        written = dh_write_request(@{
-            @"action": DH_REQ_SET_ENABLED,
-            DH_KEY_BUNDLES: values,
-            @"time": @([[NSDate date] timeIntervalSince1970]),
-        });
-    }
-    if (!written) return NO;
-
-    @try {
-        // cfprefs 同步一份，兼容旧读取路径；失败不影响结果
-        CFPreferencesSetValue((__bridge CFStringRef)DH_KEY_BUNDLES,
-            (__bridge CFPropertyListRef)values,
-            (__bridge CFStringRef)DH_DOMAIN_LOADER,
-            kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
-        CFPreferencesSynchronize((__bridge CFStringRef)DH_DOMAIN_LOADER,
-            kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
-    } @catch (__unused NSException *e) {
-        // 部分越狱环境不支持对 AnyHost 写入 CFPreferences；文件已经写成功即可。
-    }
+    if (path.length == 0 || !data) return NO;
+    NSString *dir = [path stringByDeletingLastPathComponent];
+    NSError *error = nil;
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+        withIntermediateDirectories:YES
+                         attributes:@{ NSFilePosixPermissions: @0777 }
+                              error:&error];
+    if (![data writeToFile:path options:NSDataWritingAtomic error:&error]) return NO;
+    [[NSFileManager defaultManager] setAttributes:@{
+        NSFilePosixPermissions: @0666,
+        NSFileProtectionKey: NSFileProtectionNone,
+    } ofItemAtPath:path error:nil];
     return YES;
+}
+
+static void dh_request_set_enabled(NSArray<NSString *> *values) {
+    NSDictionary *req = @{
+        @"action": DH_REQ_SET_ENABLED,
+        DH_KEY_BUNDLES: values ?: @[],
+        @"time": @([[NSDate date] timeIntervalSince1970]),
+    };
+    @try {
+        [req writeToFile:DH_REQUEST_PATH atomically:YES];
+        [[NSFileManager defaultManager] setAttributes:@{
+            NSFilePosixPermissions: @0644,
+            NSFileProtectionKey: NSFileProtectionNone,
+        } ofItemAtPath:DH_REQUEST_PATH error:nil];
+    } @catch (__unused NSException *e) {
+    }
+}
+
+BOOL DHWriteEnabledBundles(NSSet<NSString *> *bundleIDs, NSError **outError) {
+    NSArray *values = [[bundleIDs allObjects] sortedArrayUsingSelector:@selector(compare:)];
+    NSDictionary *plist = @{DH_KEY_BUNDLES: values};
+    @try {
+        NSError *error = nil;
+        NSData *data = [NSPropertyListSerialization dataWithPropertyList:plist
+            format:NSPropertyListXMLFormat_v1_0 options:0 error:&error];
+        if (!data) {
+            if (outError) *outError = error;
+            return NO;
+        }
+        // prefs 是管理器自己的权威副本；沙盒目标读不到它，还要再写 jb 配置。
+        if (![data writeToFile:DH_LOADER_PREFS options:NSDataWritingAtomic error:&error]) {
+            if (outError) *outError = error;
+            return NO;
+        }
+        [[NSFileManager defaultManager] setAttributes:@{
+            NSFilePosixPermissions: @0644,
+            NSFileProtectionKey: NSFileProtectionNone,
+        } ofItemAtPath:DH_LOADER_PREFS error:nil];
+        dh_sync_cfprefs(values);
+        (void)dh_try_write_jb_config(data);
+        dh_request_set_enabled(values);
+        return YES;
+    } @catch (NSException *e) {
+        if (outError) {
+            *outError = [NSError errorWithDomain:@"DHManager" code:-12 userInfo:
+                @{NSLocalizedDescriptionKey: e.reason ?: @"写入异常"}];
+        }
+        return NO;
+    }
 }
 
 NSDictionary *DHReadEngineMeta(void) {
@@ -136,10 +173,18 @@ NSDictionary *DHReadEngineMeta(void) {
 }
 
 NSDictionary *DHReadUpdaterState(void) {
-    NSString *dir = dh_existing_engine_dir();
-    if (!dir) return @{};
     @try {
-        NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:
+        NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:DH_STATE_PATH];
+        if ([state isKindOfClass:[NSDictionary class]]) return state;
+        NSString *root = DHBootstrapRoot();
+        if (root.length) {
+            state = [NSDictionary dictionaryWithContentsOfFile:
+                [root stringByAppendingPathComponent:DH_JB_STATE_REL]];
+            if ([state isKindOfClass:[NSDictionary class]]) return state;
+        }
+        NSString *dir = dh_existing_engine_dir();
+        if (!dir) return @{};
+        state = [NSDictionary dictionaryWithContentsOfFile:
             [dir stringByAppendingPathComponent:DH_STATE_FILE]];
         if ([state isKindOfClass:[NSDictionary class]]) return state;
     } @catch (__unused NSException *e) {
@@ -147,12 +192,62 @@ NSDictionary *DHReadUpdaterState(void) {
     return @{};
 }
 
+NSDictionary<NSString *, NSDictionary *> *DHProbeInjectedApps(void) {
+    NSMutableDictionary<NSString *, NSDictionary *> *found = [NSMutableDictionary dictionary];
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    cfg.timeoutIntervalForRequest = 0.6;
+    cfg.timeoutIntervalForResource = 0.6;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    dispatch_group_t group = dispatch_group_create();
+    NSLock *lock = [[NSLock alloc] init];
+    for (int port = 8088; port <= 8108; port++) {
+        NSURL *url = [NSURL URLWithString:
+            [NSString stringWithFormat:@"http://127.0.0.1:%d/api/stats", port]];
+        if (!url) continue;
+        dispatch_group_enter(group);
+        [[session dataTaskWithURL:url completionHandler:^(NSData *data,
+            NSURLResponse *response, NSError *error) {
+            NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
+            if (!error && http.statusCode == 200 && data.length) {
+                id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                NSString *bid = nil;
+                if ([json isKindOfClass:[NSDictionary class]]) {
+                    id proc = json[@"process"];
+                    if ([proc isKindOfClass:[NSDictionary class]]) bid = proc[@"bundleId"];
+                }
+                if ([bid isKindOfClass:[NSString class]] && bid.length) {
+                    NSDictionary *info = @{
+                        @"port": @(port),
+                        @"version": ([json[@"version"] isKindOfClass:[NSString class]]
+                            ? json[@"version"] : @""),
+                    };
+                    [lock lock];
+                    found[bid] = info;
+                    [lock unlock];
+                }
+            }
+            dispatch_group_leave(group);
+        }] resume];
+    }
+    dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)));
+    [lock lock];
+    NSDictionary *snapshot = [found copy];
+    [lock unlock];
+    [session invalidateAndCancel];
+    return snapshot;
+}
+
 BOOL DHWriteUpdateRequest(NSString *action, NSString *_Nullable version) {
     NSMutableDictionary *request = [NSMutableDictionary dictionary];
     request[@"action"] = action ?: DH_REQ_NONE;
     request[@"time"] = @([[NSDate date] timeIntervalSince1970]);
     if (version.length) request[@"version"] = version;   // 指定版本安装（历史版本）
-    return dh_write_request(request);
+    NSDictionary *req = request;
+    @try {
+        return [req writeToFile:DH_REQUEST_PATH atomically:YES];
+    } @catch (__unused NSException *e) {
+        return NO;
+    }
 }
 
 static NSString *dh_strip_v(NSString *s) {
@@ -234,7 +329,25 @@ BOOL DHWriteRestartRequest(NSString *bundleID) {
         @"bundle": bundleID,
         @"time": @([[NSDate date] timeIntervalSince1970]),
     };
-    return dh_write_request(req);
+    @try {
+        return [req writeToFile:DH_REQUEST_PATH atomically:YES];
+    } @catch (__unused NSException *e) {
+        return NO;
+    }
+}
+
+NSString *_Nullable DHPendingUpdateVersion(void) {
+    id installedValue = DHReadEngineMeta()[@"version"];
+    id latestValue = DHReadUpdaterState()[@"latestVersion"];
+    if (![installedValue isKindOfClass:[NSString class]] ||
+        ![latestValue isKindOfClass:[NSString class]]) return nil;
+    NSString *installed = installedValue;
+    NSString *latest = latestValue;
+    if (installed.length == 0 || latest.length == 0) return nil;
+    NSString *trimmed = [latest stringByTrimmingCharactersInSet:
+        [NSCharacterSet characterSetWithCharactersInString:@"vV"]];
+    if (trimmed.length == 0) return nil;
+    return DHCompareVersions(installed, trimmed) == NSOrderedAscending ? trimmed : nil;
 }
 
 BOOL DHWriteStopRequest(NSString *bundleID) {
@@ -244,7 +357,11 @@ BOOL DHWriteStopRequest(NSString *bundleID) {
         @"bundle": bundleID,
         @"time": @([[NSDate date] timeIntervalSince1970]),
     };
-    return dh_write_request(req);
+    @try {
+        return [req writeToFile:DH_REQUEST_PATH atomically:YES];
+    } @catch (__unused NSException *e) {
+        return NO;
+    }
 }
 
 #pragma mark - 历史版本

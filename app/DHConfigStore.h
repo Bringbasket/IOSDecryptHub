@@ -12,16 +12,25 @@ NSString *_Nullable DHBootstrapRoot(void);
 
 /// 已启用的注入名单
 NSSet<NSString *> *DHReadEnabledBundles(void);
-/// 写回名单；成功返回 YES（失败时调用方应回滚开关并提示）
-BOOL DHWriteEnabledBundles(NSSet<NSString *> *bundleIDs);
+/// 写回名单；成功返回 YES（失败时调用方应回滚开关并提示）。
+/// 先写 loader prefs（UI 立刻成功），再尽力写 jb 配置给沙盒目标读；
+/// rootHide 写不动 jb 时丢 set-enabled 请求，由 updated.sh 拷贝。不在 UI 线程等 launchd。
+BOOL DHWriteEnabledBundles(NSSet<NSString *> *bundleIDs, NSError *_Nullable *_Nullable error);
 
 /// 引擎元信息 {version, variant, arch}，缺失返回空字典
 NSDictionary *DHReadEngineMeta(void);
 /// daemon 写的更新状态，缺失返回空字典
 NSDictionary *DHReadUpdaterState(void);
 
+/// 扫本机 8088..8108：bundleId → @{ @"port": N, @"version": @"..." }。引擎已进进程才会响应。
+NSDictionary<NSString *, NSDictionary *> *DHProbeInjectedApps(void);
+
 /// 向 daemon 提交更新请求（check / install / rollback）；version 非空时安装指定版本
 BOOL DHWriteUpdateRequest(NSString *action, NSString *_Nullable version);
+
+/// 若 daemon 已探到更新，返回可用版本号（如 "1.25.4"），否则 nil。
+/// 数据来自 daemon 写的 state（每 12 小时自动检查一次，不占 API 配额）。
+NSString *_Nullable DHPendingUpdateVersion(void);
 
 /// 请求停止指定 App（只结束进程，不重新打开，由 daemon 执行）
 BOOL DHWriteStopRequest(NSString *bundleID);

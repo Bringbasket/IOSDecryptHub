@@ -1,7 +1,7 @@
 // main.m — IOSDecryptHub updater daemon（一次性进程）
 //
 // 由 launchd 按需拉起（WatchPaths 请求文件 / StartInterval 12h），跑完即退。
-// 不 hook、不常驻、不监听端口。只做四件事：检查更新 / 下载安装引擎 / 回滚 / 写 state。
+// 不 hook、不常驻、不监听端口。只做：检查更新 / 下载安装引擎 / 回滚 / 重启或停止 App / 代写启用名单 / 写 state。
 //
 // 安全边界：
 //   - request 文件是 mobile 可写的，只取 action；下载地址一律自己重查 GitHub 推导。
@@ -18,6 +18,9 @@
 #import <sys/sysctl.h>
 #import <sys/file.h>
 #import <fcntl.h>
+#import <errno.h>
+#import <string.h>
+#import <limits.h>
 #import <mach-o/loader.h>
 #import <mach-o/fat.h>
 #import "dh_shared.h"
@@ -28,6 +31,7 @@
 #define DH_NET_TIMEOUT 30.0
 
 static NSString *g_engine_dir = nil;
+static BOOL g_engine_writable = NO;
 static NSMutableDictionary *g_state = nil;
 
 #pragma mark - log / plist
@@ -73,21 +77,85 @@ static NSString *_Nullable dh_bootstrap_root(void) {
     // daemon 布局: <bootstrap>/usr/lib/IOSDecryptHub/IOSDecryptHubUpdated，向上四级
     NSString *root = [NSString stringWithUTF8String:info.dli_fname];
     for (int i = 0; i < 4; i++) root = [root stringByDeletingLastPathComponent];
-    if (root.length <= 1) return nil;
+    // "/" 是合法 jbroot（rootHide 的 SSH 视角）
+    if (root.length == 0) return nil;
     return root;
+}
+
+static BOOL dh_dir_is_writable(NSString *dir) {
+    // 不用 NSFileManager：rootHide 下 fileExists 对短路径撒谎，.jbroot 前缀 open 又 EPERM。
+    NSString *probe = [dir stringByAppendingPathComponent:@".updated.lock"];
+    int fd = open(probe.fileSystemRepresentation, O_CREAT | O_RDWR | O_CLOEXEC, 0644);
+    if (fd < 0) return NO;
+    close(fd);
+    return YES;
+}
+
+static BOOL dh_dylib_readable(NSString *dir) {
+    NSString *path = [dir stringByAppendingPathComponent:DH_ENGINE_NAME];
+    int fd = open(path.fileSystemRepresentation, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return NO;
+    close(fd);
+    return YES;
+}
+
+static BOOL dh_ensure_dir(NSString *dir) {
+    if (dir.length == 0) return NO;
+    if (mkdir(dir.fileSystemRepresentation, 0755) != 0 && errno != EEXIST) return NO;
+    return dh_dir_is_writable(dir);
+}
+
+static NSString *_Nullable dh_jbroot_from_engine(void) {
+    if (!g_engine_dir.length) return nil;
+    NSString *root = g_engine_dir;
+    for (int i = 0; i < 3; i++) root = [root stringByDeletingLastPathComponent];
+    return root.length ? root : nil;
+}
+
+static NSString *_Nullable dh_jb_path(NSString *relative) {
+    NSString *root = dh_jbroot_from_engine();
+    if (!root.length) return nil;
+    return [root stringByAppendingPathComponent:relative];
+}
+
+static NSString *_Nullable dh_stage_dir(void) {
+    NSString *jbStage = dh_jb_path(DH_JB_STAGE_REL);
+    if (jbStage.length && dh_ensure_dir(jbStage)) return jbStage;
+    if (dh_ensure_dir(DH_STAGE_DIR)) return DH_STAGE_DIR;
+    if (g_engine_dir.length && dh_dir_is_writable(g_engine_dir)) return g_engine_dir;
+    return nil;
 }
 
 static NSString *_Nullable dh_existing_engine_dir(void) {
     NSMutableArray<NSString *> *dirs = [NSMutableArray array];
-    NSString *root = dh_bootstrap_root();
-    if (root) [dirs addObject:[root stringByAppendingPathComponent:@"usr/lib/IOSDecryptHub"]];
+    [dirs addObject:@"/usr/lib/IOSDecryptHub"];
     [dirs addObject:@"/var/jb/usr/lib/IOSDecryptHub"];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    BOOL isDir = NO;
-    for (NSString *dir in dirs) {
-        if ([fm fileExistsAtPath:dir isDirectory:&isDir] && isDir) return dir;
+    NSString *root = dh_bootstrap_root();
+    if (root.length) {
+        char resolved[PATH_MAX];
+        if (realpath(root.fileSystemRepresentation, resolved)) {
+            NSString *real = [NSString stringWithUTF8String:resolved];
+            if (real.length && ![real isEqualToString:@"/"]) {
+                [dirs addObject:[real stringByAppendingPathComponent:@"usr/lib/IOSDecryptHub"]];
+            }
+        }
+        if (![root isEqualToString:@"/"]) {
+            [dirs addObject:[root stringByAppendingPathComponent:@"usr/lib/IOSDecryptHub"]];
+        }
     }
-    return nil;
+    NSMutableArray<NSString *> *seen = [NSMutableArray array];
+    NSString *readable = nil;
+    for (NSString *dir in dirs) {
+        if ([seen containsObject:dir]) continue;
+        [seen addObject:dir];
+        errno = 0;
+        if (dh_dylib_readable(dir)) {
+            readable = dir;
+            break;
+        }
+        dh_log("引擎目录不可读，跳过 %s (%s)", dir.UTF8String ?: "", strerror(errno));
+    }
+    return readable;
 }
 
 #pragma mark - 单实例锁
@@ -95,13 +163,26 @@ static NSString *_Nullable dh_existing_engine_dir(void) {
 // launchd 的 WatchPaths 与 StartInterval 可能叠在一起触发。并发改写引擎 =
 // 半写 + 备份互踩，所以第二个实例必须立刻退出（拿不到锁就当作"已有实例在跑"）。
 static int dh_acquire_lock(void) {
-    if (!g_engine_dir) return -1;
-    NSString *path = [g_engine_dir stringByAppendingPathComponent:@".updated.lock"];
+    NSString *path = nil;
+    if (g_engine_writable && g_engine_dir.length) {
+        path = [g_engine_dir stringByAppendingPathComponent:@".updated.lock"];
+    } else {
+        path = dh_jb_path(DH_JB_LOCK_REL);
+        if (path.length) dh_ensure_dir([path stringByDeletingLastPathComponent]);
+        if (!path.length || !dh_dir_is_writable([path stringByDeletingLastPathComponent])) {
+            path = DH_LOCK_PATH;
+            dh_ensure_dir([path stringByDeletingLastPathComponent]);
+        }
+    }
     // O_CLOEXEC：下面重启 App 会 fork+exec，子进程绝不能继承这把锁，
     // 否则它退出前后续所有 daemon 实例都会被挡在门外。
     int fd = open(path.fileSystemRepresentation, O_CREAT | O_RDWR | O_CLOEXEC, 0644);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        dh_log("锁文件 open 失败 %s: %s", path.fileSystemRepresentation ?: "", strerror(errno));
+        return -1;
+    }
     if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        dh_log("锁文件 flock 失败 %s: %s", path.UTF8String ?: "", strerror(errno));
         close(fd);
         return -1;
     }
@@ -111,10 +192,18 @@ static int dh_acquire_lock(void) {
 #pragma mark - state
 
 static void dh_state_save(void) {
-    if (!g_engine_dir || !g_state) return;
-    NSString *path = [g_engine_dir stringByAppendingPathComponent:DH_STATE_FILE];
-    if (dh_write_plist(g_state, path)) {
-        chmod(path.fileSystemRepresentation, 0644);
+    if (!g_state) return;
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    [paths addObject:DH_STATE_PATH];
+    NSString *jbState = dh_jb_path(DH_JB_STATE_REL);
+    if (jbState.length) [paths addObject:jbState];
+    if (g_engine_dir.length) {
+        [paths addObject:[g_engine_dir stringByAppendingPathComponent:DH_STATE_FILE]];
+    }
+    for (NSString *path in paths) {
+        if (dh_write_plist(g_state, path)) {
+            chmod(path.fileSystemRepresentation, 0644);
+        }
     }
 }
 
@@ -384,8 +473,11 @@ static BOOL dh_macho_has_arm64(NSString *path, NSString **archOut) {
 #pragma mark - 名单 / 进程
 
 static NSArray<NSString *> *dh_enabled_bundle_ids(void) {
-    NSDictionary *domain = dh_read_plist([g_engine_dir stringByAppendingPathComponent:@"config/enabledBundles.plist"]);
+    NSDictionary *domain = dh_read_plist(DH_LOADER_PREFS);
     id value = domain[DH_KEY_BUNDLES];
+    if ([value isKindOfClass:[NSArray class]]) return value;
+    domain = dh_read_plist([g_engine_dir stringByAppendingPathComponent:@"config/enabledBundles.plist"]);
+    value = domain[DH_KEY_BUNDLES];
     if ([value isKindOfClass:[NSArray class]]) return value;
     return @[];
 }
@@ -469,16 +561,30 @@ static NSArray<NSString *> *dh_kill_processes_named(NSSet<NSString *> *names) {
 static BOOL dh_relaunch_app(NSString *bundleID) {
     const char *candidates[] = { "/var/jb/usr/bin/uiopen", "/usr/local/bin/uiopen",
                                  "/usr/bin/uiopen", NULL };
-    const char *tool = NULL;
-    for (int i = 0; candidates[i]; i++) {
-        if (access(candidates[i], X_OK) == 0) { tool = candidates[i]; break; }
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    if (g_engine_dir.length) {
+        NSString *root = g_engine_dir;
+        for (int i = 0; i < 3; i++) root = [root stringByDeletingLastPathComponent];
+        if (root.length) [paths addObject:[root stringByAppendingPathComponent:@"usr/bin/uiopen"]];
     }
-    if (!tool) return NO;
+    for (int i = 0; candidates[i]; i++) {
+        [paths addObject:[NSString stringWithUTF8String:candidates[i]]];
+    }
+    char toolBuf[PATH_MAX];
+    toolBuf[0] = '\0';
+    for (NSString *path in paths) {
+        if (access(path.fileSystemRepresentation, X_OK) == 0) {
+            strncpy(toolBuf, path.fileSystemRepresentation, sizeof(toolBuf) - 1);
+            toolBuf[sizeof(toolBuf) - 1] = '\0';
+            break;
+        }
+    }
+    if (!toolBuf[0]) return NO;
     pid_t pid = fork();
     if (pid < 0) return NO;
     if (pid == 0) {
         setsid();   // 脱离会话，daemon 退出也不影响它
-        execl(tool, tool, "--bundleid", bundleID.UTF8String, (char *)NULL);
+        execl(toolBuf, toolBuf, "--bundleid", bundleID.UTF8String, (char *)NULL);
         _exit(127);
     }
     return YES;
@@ -609,8 +715,13 @@ static void dh_do_install(NSString *_Nullable requestedVersion) {
                      explicitVersion ? @"已经是这个版本" : @"已是最新，无需安装", nil);
         return;
     }
+    NSString *stage = dh_stage_dir();
+    if (!stage.length) {
+        dh_record_op(@"install", version, @"error", @"没有可写的下载目录", nil);
+        return;
+    }
     NSString *curPath = [g_engine_dir stringByAppendingPathComponent:DH_ENGINE_NAME];
-    NSString *newPath = [g_engine_dir stringByAppendingPathComponent:DH_ENGINE_NEW];
+    NSString *newPath = [stage stringByAppendingPathComponent:DH_ENGINE_NEW];
     NSString *bakPath = [g_engine_dir stringByAppendingPathComponent:DH_ENGINE_BAK];
     NSFileManager *fm = [NSFileManager defaultManager];
 
@@ -623,6 +734,21 @@ static void dh_do_install(NSString *_Nullable requestedVersion) {
     if (!dh_macho_has_arm64(newPath, &arch)) {
         [fm removeItemAtPath:newPath error:nil];
         dh_record_op(@"install", version, @"error", @"下载文件校验失败（体积/架构异常），已丢弃", nil);
+        return;
+    }
+    NSMutableDictionary *stagedMeta = [(dh_read_plist([g_engine_dir stringByAppendingPathComponent:DH_VERSION_FILE]) ?: @{}) mutableCopy];
+    stagedMeta[@"version"] = version;
+    stagedMeta[@"arch"] = arch ?: @"arm64";
+    dh_write_plist(stagedMeta, [stage stringByAppendingPathComponent:DH_VERSION_FILE]);
+
+    if (!g_engine_writable) {
+        // rootHide：本进程对引擎目录 EPERM，把已校验的文件留给 launchd 的 /bin/sh 落位。
+        dh_log("引擎目录不可写，已放到 staging，由 updated.sh 落位");
+        g_state[@"updateAvailable"] = @NO;
+        g_state[@"backupAvailable"] = @YES;
+        g_state[@"backupVersion"] = local;
+        dh_state_save();
+        dh_record_op(@"install", version, @"ok", @"staged", nil);
         return;
     }
     // 备份当前版（swap 语义：回滚后备份里是刚换下来的新版，仍可再回滚）。
@@ -693,6 +819,23 @@ static void dh_do_install(NSString *_Nullable requestedVersion) {
 }
 
 static void dh_do_rollback(void) {
+    if (!g_engine_writable) {
+        NSString *stage = dh_stage_dir();
+        if (!stage.length) {
+            dh_record_op(@"rollback", nil, @"error", @"没有可写的回滚标记目录", nil);
+            return;
+        }
+        NSString *flag = [stage stringByAppendingPathComponent:@"do_rollback"];
+        int fd = open(flag.fileSystemRepresentation, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0644);
+        if (fd < 0) {
+            dh_record_op(@"rollback", nil, @"error", @"无法写下回滚标记", nil);
+            return;
+        }
+        close(fd);
+        dh_log("引擎目录不可写，已标记回滚，由 updated.sh 落位");
+        dh_record_op(@"rollback", nil, @"ok", @"staged", nil);
+        return;
+    }
     NSString *curPath = [g_engine_dir stringByAppendingPathComponent:DH_ENGINE_NAME];
     NSString *bakPath = [g_engine_dir stringByAppendingPathComponent:DH_ENGINE_BAK];
     NSString *metaPath = [g_engine_dir stringByAppendingPathComponent:DH_VERSION_FILE];
@@ -851,12 +994,17 @@ int main(int argc, char *argv[]) {
             dh_log("引擎目录不存在，退出");
             return 0;
         }
+        g_engine_writable = dh_dir_is_writable(g_engine_dir);
+        dh_log("引擎目录 %s writable=%d", g_engine_dir.UTF8String ?: "(nil)", g_engine_writable ? 1 : 0);
         int lockFd = dh_acquire_lock();
         if (lockFd < 0) {
-            dh_log("已有实例在运行，退出");
+            dh_log("拿不到锁，退出");
             return 0;
         }
-        g_state = [(dh_read_plist([g_engine_dir stringByAppendingPathComponent:DH_STATE_FILE]) ?: @{}) mutableCopy];
+        NSDictionary *mobileState = dh_read_plist(DH_STATE_PATH);
+        NSDictionary *jbState = dh_read_plist(dh_jb_path(DH_JB_STATE_REL));
+        NSDictionary *engineState = dh_read_plist([g_engine_dir stringByAppendingPathComponent:DH_STATE_FILE]);
+        g_state = [((mobileState ?: jbState) ?: (engineState ?: @{})) mutableCopy];
         dh_process_request();
         dh_periodic_check();
         g_state[@"daemonHeartbeat"] = @([[NSDate date] timeIntervalSince1970]);

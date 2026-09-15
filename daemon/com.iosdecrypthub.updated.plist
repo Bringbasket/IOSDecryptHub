@@ -6,13 +6,12 @@
     <string>com.iosdecrypthub.updated</string>
     <key>ProgramArguments</key>
     <array>
-        <string>@PREFIX@/usr/lib/IOSDecryptHub/IOSDecryptHubUpdated</string>
+        <string>@PREFIX@/usr/lib/IOSDecryptHub/updated.sh</string>
     </array>
-    <key>UserName</key>
-    <string>root</string>
     <key>WatchPaths</key>
     <array>
         <string>/var/mobile/Library/Preferences/com.iosdecrypthub.updater.request.plist</string>
+        <string>/var/mobile/Library/Preferences/com.iosdecrypthub.loader.plist</string>
     </array>
     <key>StartInterval</key>
     <integer>43200</integer>

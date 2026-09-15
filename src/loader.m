@@ -15,39 +15,48 @@
 #define PREFS_DOMAIN    @"com.iosdecrypthub.loader"
 #define PREFS_KEY       @"enabledBundles"
 #define PREFS_PATH      @"/var/mobile/Library/Preferences/com.iosdecrypthub.loader.plist"
-#define CONFIG_NAME    @"IOSDecryptHub/config/enabledBundles.plist"
+#define ENGINE_REL      @"usr/lib/IOSDecryptHub/decrypt_helper.dylib"
+#define CONFIG_REL      @"usr/lib/IOSDecryptHub/config/enabledBundles.plist"
 
-// rootless 下 /var/jb 只是引导期别名，宿主沙盒中不一定可见。优先从 loader 的 dyld
-// 实际路径推导同一 bootstrap 下的主 dylib，再兼容固定路径。
-static NSArray<NSString *> *dh_dylib_candidates(void) {
+// 不依赖 /var/jb，也不用 access()/fileExists 探路（宿主沙盒会谎称不存在）。
+// loader 实际可能在：
+//   <jb>/Library/MobileSubstrate/DynamicLibraries/  （本包安装位置，向上 4 级到 jbroot）
+//   <jb>/usr/lib/TweakInject/                       （ElleKit 加载位置，同样向上 4 级）
+// 旧逻辑只向上 2 级再拼 IOSDecryptHub/…，仅 TweakInject 布局碰巧正确。
+static void dh_add_unique(NSMutableArray<NSString *> *paths, NSString *path) {
+    if (path.length && ![paths containsObject:path]) [paths addObject:path];
+}
+
+static NSArray<NSString *> *dh_paths_from_loader(NSString *relativeToJbroot) {
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
     Dl_info info = {0};
-    if (dladdr((const void *)&dh_dylib_candidates, &info) != 0 && info.dli_fname) {
+    if (dladdr((const void *)&dh_paths_from_loader, &info) != 0 && info.dli_fname) {
+        NSString *cur = [NSString stringWithUTF8String:info.dli_fname];
+        for (int i = 0; i < 4 && cur.length > 1; i++) {
+            cur = [cur stringByDeletingLastPathComponent];
+        }
+        if (cur.length > 1) {
+            dh_add_unique(paths, [cur stringByAppendingPathComponent:relativeToJbroot]);
+        }
+        // 兼容 TweakInject：向上 2 级 = usr/lib，相对路径去掉 usr/lib/ 前缀
         NSString *loaderPath = [NSString stringWithUTF8String:info.dli_fname];
-        NSString *libDir = [[loaderPath stringByDeletingLastPathComponent]
+        NSString *usrLib = [[loaderPath stringByDeletingLastPathComponent]
             stringByDeletingLastPathComponent];
-        if (libDir.length) {
-            [paths addObject:[libDir stringByAppendingPathComponent:
-                @"IOSDecryptHub/decrypt_helper.dylib"]];
+        if ([relativeToJbroot hasPrefix:@"usr/lib/"] && usrLib.length > 1) {
+            dh_add_unique(paths, [usrLib stringByAppendingPathComponent:
+                [relativeToJbroot substringFromIndex:8]]);
         }
     }
-    [paths addObject:@"/var/jb/usr/lib/IOSDecryptHub/decrypt_helper.dylib"];
+    dh_add_unique(paths, [@"/var/jb/" stringByAppendingString:relativeToJbroot]);
     return paths;
 }
 
+static NSArray<NSString *> *dh_dylib_candidates(void) {
+    return dh_paths_from_loader(ENGINE_REL);
+}
+
 static NSArray<NSString *> *dh_config_candidates(void) {
-    NSMutableArray<NSString *> *paths = [NSMutableArray array];
-    Dl_info info = {0};
-    if (dladdr((const void *)&dh_config_candidates, &info) != 0 && info.dli_fname) {
-        NSString *loaderPath = [NSString stringWithUTF8String:info.dli_fname];
-        NSString *libDir = [[loaderPath stringByDeletingLastPathComponent]
-            stringByDeletingLastPathComponent];
-        if (libDir.length) {
-            [paths addObject:[libDir stringByAppendingPathComponent:CONFIG_NAME]];
-        }
-    }
-    [paths addObject:@"/var/jb/usr/lib/IOSDecryptHub/config/enabledBundles.plist"];
-    return paths;
+    return dh_paths_from_loader(CONFIG_REL);
 }
 
 // 说明：曾短暂加过"我们自己的组件不注入"的特例（想让管理器 App 里不弹悬浮窗），
@@ -64,41 +73,42 @@ static BOOL dh_should_inject(NSString *bundleID) {
 
 
     NSArray *enabled = nil;
+    const char *source = "none";
     @try {
-        // 插件自带配置与主 dylib 位于同一越狱授权路径，不受宿主 App 偏好容器隔离。
-        NSDictionary *prefs = nil;
-        for (NSString *configPath in dh_config_candidates()) {
-            prefs = [NSDictionary dictionaryWithContentsOfFile:configPath];
-            enabled = prefs[PREFS_KEY];
-            if ([enabled isKindOfClass:[NSArray class]]) break;
-        }
-
-        // 兼容旧版直接写入 /var/mobile/Library/Preferences 的配置。
-        if (![enabled isKindOfClass:[NSArray class]]) {
-            prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
-            enabled = prefs[PREFS_KEY];
-        }
-
-        if (![enabled isKindOfClass:[NSArray class]]) {
-            // 通过 cfprefsd 按应用域读取，避免宿主 App 的容器视图隔离共享 plist。
-            CFPreferencesAppSynchronize((__bridge CFStringRef)PREFS_DOMAIN);
+        // prefs 读到数组（含空数组=全关）就用。沙盒目标通常读不到这份文件，
+        // 再回退 jb 配置；禁止在宿主进程里 Synchronize 此外域。
+        NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
+        enabled = prefs[PREFS_KEY];
+        if ([enabled isKindOfClass:[NSArray class]]) {
+            source = "prefs";
+        } else {
             CFPropertyListRef value = CFPreferencesCopyAppValue(
                 (__bridge CFStringRef)PREFS_KEY,
                 (__bridge CFStringRef)PREFS_DOMAIN);
             enabled = CFBridgingRelease(value);
-        }
-
-        if (![enabled isKindOfClass:[NSArray class]]) {
-            prefs = [[NSUserDefaults standardUserDefaults]
-                persistentDomainForName:PREFS_DOMAIN];
-            enabled = prefs[PREFS_KEY];
+            if ([enabled isKindOfClass:[NSArray class]]) {
+                source = "cfprefs";
+            } else {
+                for (NSString *configPath in dh_config_candidates()) {
+                    prefs = [NSDictionary dictionaryWithContentsOfFile:configPath];
+                    enabled = prefs[PREFS_KEY];
+                    if ([enabled isKindOfClass:[NSArray class]]) {
+                        source = "jb";
+                        break;
+                    }
+                }
+            }
         }
     } @catch (__unused NSException *exception) {
         return NO;
     }
     if (!enabled || ![enabled isKindOfClass:[NSArray class]]) return NO;
-
-    return [enabled containsObject:bundleID];
+    BOOL hit = [enabled containsObject:bundleID];
+    if (hit) {
+        syslog(LOG_NOTICE, LOADER_TAG " 将注入 %s source=%s",
+               bundleID.UTF8String, source);
+    }
+    return hit;
 }
 
 __attribute__((constructor))
