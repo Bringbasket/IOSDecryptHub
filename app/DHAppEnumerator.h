@@ -1,20 +1,31 @@
 // DHAppEnumerator.h — 已安装 App 的枚举与图标
 //
-// 只做两件事：列出用户 App（带显示名与 bundle 路径）、给出图标。
+// 列出用户、TrollStore、系统与越狱 App（带显示名、分类和 bundle 路径），并给出图标。
 // 图标加载带缓存，供列表滚动时调用。
 
 #import <UIKit/UIKit.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef NS_ENUM(NSInteger, DHAppCategory) {
+    DHAppCategoryUser = 0,
+    DHAppCategoryTroll,
+    DHAppCategorySystem,
+    DHAppCategoryJailbreak,
+};
+
 @interface DHAppInfo : NSObject
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic, copy, nullable) NSString *bundlePath;
+@property (nonatomic, assign) DHAppCategory category;
 @end
 
-/// 已安装的用户 App（按显示名排序，已过滤系统 App）：先走 LaunchServices，失败兜底扫容器目录
+/// 已安装 App（按显示名排序）：合并 LaunchServices、用户容器、系统目录与越狱目录。
 NSArray<DHAppInfo *> *DHInstalledApps(void);
+
+/// 列表副标题使用的分类名称。
+NSString *DHAppCategoryDisplayName(DHAppCategory category);
 
 /// 单个 App 的原始图标：先取系统图标缓存，再退回读 bundle 内的图标文件；都可能失败时返回 nil
 UIImage *_Nullable DHAppIcon(NSString *bundleID, NSString *_Nullable bundlePath);

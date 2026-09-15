@@ -18,12 +18,75 @@ extern char **environ;
 @interface NSObject (DHLaunchServices)
 + (instancetype)defaultWorkspace;
 - (NSArray *)allApplications;
+- (NSArray *)allInstalledApplications;
 - (NSString *)applicationIdentifier;
 - (NSString *)localizedName;
 - (NSString *)applicationType;
 - (NSURL *)bundleURL;
 - (BOOL)openApplicationWithBundleID:(NSString *)bundleID;
 @end
+
+NSString *DHAppCategoryDisplayName(DHAppCategory category) {
+    switch (category) {
+        case DHAppCategoryUser:      return @"用户应用";
+        case DHAppCategoryTroll:     return @"巨魔应用";
+        case DHAppCategorySystem:    return @"系统应用";
+        case DHAppCategoryJailbreak: return @"越狱应用";
+    }
+    return @"应用";
+}
+
+static BOOL dh_is_container_path(NSString *path) {
+    if (path.length == 0) return NO;
+    return [path rangeOfString:@"/var/containers/Bundle/Application/"].location != NSNotFound;
+}
+
+static BOOL dh_has_troll_marker(NSString *appPath) {
+    if (!dh_is_container_path(appPath)) return NO;
+    NSString *container = [appPath stringByDeletingLastPathComponent];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    return [fm fileExistsAtPath:[container stringByAppendingPathComponent:@"_TrollStore"]] ||
+           [fm fileExistsAtPath:[container stringByAppendingPathComponent:@"_TrollStoreLite"]];
+}
+
+static void dh_record_app(NSMutableDictionary<NSString *, NSDictionary *> *apps,
+                          NSString *bundleID, NSString *_Nullable name,
+                          NSString *_Nullable path, NSString *_Nullable type,
+                          BOOL trollMarked) {
+    if (bundleID.length == 0) return;
+    NSDictionary *old = apps[bundleID];
+    NSString *finalName = old[@"name"];
+    if (finalName.length == 0 || [finalName isEqualToString:bundleID]) {
+        finalName = name.length ? name : bundleID;
+    }
+    NSString *oldPath = old[@"path"];
+    NSString *finalPath = oldPath.length ? oldPath : (path ?: @"");
+    NSString *oldType = old[@"type"];
+    NSString *finalType = oldType.length ? oldType : (type ?: @"");
+    BOOL marked = [old[@"troll"] boolValue] || trollMarked || dh_has_troll_marker(finalPath);
+    apps[bundleID] = @{
+        @"name": finalName ?: bundleID,
+        @"path": finalPath ?: @"",
+        @"type": finalType ?: @"",
+        @"troll": @(marked),
+    };
+}
+
+static DHAppCategory dh_category(NSString *bundleID, NSDictionary *record) {
+    NSString *path = record[@"path"];
+    NSString *type = record[@"type"];
+    if ([bundleID hasPrefix:@"com.apple."]) return DHAppCategorySystem;
+    if ([record[@"troll"] boolValue]) return DHAppCategoryTroll;
+    if ([type isEqualToString:@"User"]) return DHAppCategoryUser;
+    if (dh_is_container_path(path)) {
+        return type.length && ![type isEqualToString:@"User"]
+            ? DHAppCategoryTroll : DHAppCategoryUser;
+    }
+    if (type.length && ![type isEqualToString:@"User"] && path.length == 0) {
+        return DHAppCategoryTroll;
+    }
+    return DHAppCategoryJailbreak;
+}
 
 static NSDictionary<NSString *, id> *dh_collect(void) {
     // bundleID -> @{@"name": ..., @"path": ...}
@@ -38,18 +101,39 @@ static NSDictionary<NSString *, id> *dh_collect(void) {
         dlopen(frameworks[i], RTLD_LAZY | RTLD_LOCAL);
         workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
     }
+    id workspace = nil;
     @try {
         if (workspaceClass && [workspaceClass respondsToSelector:@selector(defaultWorkspace)]) {
-            id workspace = [workspaceClass defaultWorkspace];
-            NSArray *proxies = [workspace respondsToSelector:@selector(allApplications)]
-                ? [workspace allApplications] : nil;
-            for (id proxy in proxies) {
+            workspace = [workspaceClass defaultWorkspace];
+        }
+    } @catch (__unused NSException *e) {
+        workspace = nil;
+    }
+
+    NSMutableArray *proxies = [NSMutableArray array];
+    if ([workspace respondsToSelector:@selector(allApplications)]) {
+        @try {
+            NSArray *items = [workspace allApplications];
+            if ([items isKindOfClass:[NSArray class]]) [proxies addObjectsFromArray:items];
+        } @catch (__unused NSException *e) {
+            // 某些系统版本会禁用这个 selector，继续尝试另一个接口。
+        }
+    }
+    if ([workspace respondsToSelector:@selector(allInstalledApplications)]) {
+        @try {
+            NSArray *items = [workspace allInstalledApplications];
+            if ([items isKindOfClass:[NSArray class]]) [proxies addObjectsFromArray:items];
+        } @catch (__unused NSException *e) {
+            // 保留 allApplications 的结果，文件系统扫描也会继续补齐。
+        }
+    }
+    for (id proxy in proxies) {
+        @try {
                 NSString *bundleID = [proxy respondsToSelector:@selector(applicationIdentifier)]
                     ? [proxy applicationIdentifier] : nil;
-                if (bundleID.length == 0 || [bundleID hasPrefix:@"com.apple."]) continue;
+                if (bundleID.length == 0) continue;
                 NSString *type = [proxy respondsToSelector:@selector(applicationType)]
                     ? [proxy applicationType] : nil;
-                if (type.length > 0 && ![type isEqualToString:@"User"]) continue;
                 NSString *name = [proxy respondsToSelector:@selector(localizedName)]
                     ? [proxy localizedName] : nil;
                 NSString *path = nil;
@@ -57,46 +141,44 @@ static NSDictionary<NSString *, id> *dh_collect(void) {
                     id url = [proxy bundleURL];
                     if ([url isKindOfClass:[NSURL class]]) path = [url path];
                 }
-                apps[bundleID] = @{ @"name": name.length ? name : bundleID,
-                                    @"path": path ?: @"" };
-            }
+                dh_record_app(apps, bundleID, name, path, type, dh_has_troll_marker(path));
+        } @catch (__unused NSException *e) {
+            // 单个损坏或受限的代理不应中断整个应用列表。
         }
-    } @catch (__unused NSException *e) {
-        apps = [NSMutableDictionary dictionary];
     }
 
-    // 越狱安装的 App（Dopamine、Sileo 等）不在 /var/containers 里，而在 <jbroot>/Applications。
-    // 不扫这里就会出现"图标不显示"（bundle 路径取不到）。
+    // 合并越狱与系统 App 目录；LaunchServices 的本地化名称优先。
     {
-        const char *home = getenv("HOME");
-        (void)home;
         NSMutableArray<NSString *> *jbDirs = [NSMutableArray array];
         // 从主可执行文件路径反推越狱根（App 在 <jbroot>/Applications/*.app/…）
         Dl_info info = {0};
         if (dladdr((const void *)&dh_collect, &info) != 0 && info.dli_fname) {
             NSString *path = [NSString stringWithUTF8String:info.dli_fname];
             for (int i = 0; i < 3; i++) path = [path stringByDeletingLastPathComponent];
-            if (path.length > 1) [jbDirs addObject:[path stringByAppendingPathComponent:@"Applications"]];
+            if (path.length) [jbDirs addObject:[path stringByAppendingPathComponent:@"Applications"]];
         }
         [jbDirs addObject:@"/var/jb/Applications"];
         [jbDirs addObject:@"/Applications"];
+        [jbDirs addObject:@"/System/Applications"];
+        [jbDirs addObject:@"/System/Library/CoreServices"];
         NSFileManager *fm = [NSFileManager defaultManager];
+        NSMutableSet<NSString *> *seen = [NSMutableSet set];
         for (NSString *dir in jbDirs) {
+            if ([seen containsObject:dir]) continue;
+            [seen addObject:dir];
             for (NSString *entry in [fm contentsOfDirectoryAtPath:dir error:nil]) {
                 if (![entry.pathExtension.lowercaseString isEqualToString:@"app"]) continue;
                 NSString *appPath = [dir stringByAppendingPathComponent:entry];
                 NSDictionary *info2 = [NSDictionary dictionaryWithContentsOfFile:
                     [appPath stringByAppendingPathComponent:@"Info.plist"]];
                 NSString *bundleID = info2[@"CFBundleIdentifier"];
-                if (bundleID.length == 0 || [bundleID hasPrefix:@"com.apple."]) continue;
-                if (apps[bundleID]) continue;   // LaunchServices 已给出更完整的名字
                 NSString *name = info2[@"CFBundleDisplayName"] ?: info2[@"CFBundleName"];
-                apps[bundleID] = @{ @"name": name.length ? name : bundleID, @"path": appPath };
+                dh_record_app(apps, bundleID, name, appPath, nil, dh_has_troll_marker(appPath));
             }
         }
     }
 
-    if (apps.count == 0) {  // 兜底：直接扫容器目录（LaunchServices 不可用时）
+    {  // 始终扫描容器：LaunchServices 只漏部分巨魔 App 时也能补回来。
         NSFileManager *fm = [NSFileManager defaultManager];
         NSArray<NSString *> *containers =
             [fm contentsOfDirectoryAtPath:@"/var/containers/Bundle/Application" error:nil];
@@ -108,9 +190,11 @@ static NSDictionary<NSString *, id> *dh_collect(void) {
                 NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
                     [appPath stringByAppendingPathComponent:@"Info.plist"]];
                 NSString *bundleID = info[@"CFBundleIdentifier"];
-                if (bundleID.length == 0 || [bundleID hasPrefix:@"com.apple."]) continue;
                 NSString *name = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"];
-                apps[bundleID] = @{ @"name": name.length ? name : bundleID, @"path": appPath };
+                BOOL trollMarked =
+                    [fm fileExistsAtPath:[base stringByAppendingPathComponent:@"_TrollStore"]] ||
+                    [fm fileExistsAtPath:[base stringByAppendingPathComponent:@"_TrollStoreLite"]];
+                dh_record_app(apps, bundleID, name, appPath, nil, trollMarked);
             }
         }
     }
@@ -126,6 +210,7 @@ NSArray<DHAppInfo *> *DHInstalledApps(void) {
         app.name = raw[bundleID][@"name"];
         NSString *path = raw[bundleID][@"path"];
         app.bundlePath = path.length ? path : nil;
+        app.category = dh_category(bundleID, raw[bundleID]);
         [out addObject:app];
     }
     [out sortUsingComparator:^NSComparisonResult(DHAppInfo *l, DHAppInfo *r) {

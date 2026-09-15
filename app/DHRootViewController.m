@@ -1,7 +1,7 @@
 // DHRootViewController.m — 主界面：管理与查看注入的 App
 //
 // 设计取向（按使用逻辑，不按实现）：
-//   - 打开就是"我开了哪些 App"；顶部可过滤出「已启用」
+//   - 顶部按「所有 / 用户 / 巨魔 / 系统」过滤，搜索在当前分类内生效
 //   - 全部应用按首字母分组，右侧有快速导航索引（中文按拼音首字母）
 //   - 每行只有图标（R 角）+ 名称 + 开关；取不到图标时用首字母默认图标，绝不空着
 //   - 提示文案只留一句真正需要用户做动作的
@@ -13,7 +13,9 @@
 
 typedef NS_ENUM(NSInteger, DHFilter) {
     DHFilterAll = 0,
-    DHFilterEnabled,
+    DHFilterUser,
+    DHFilterTroll,
+    DHFilterSystem,
 };
 
 @interface DHRootViewController () <UISearchResultsUpdating>
@@ -25,8 +27,8 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 @property (nonatomic, copy) NSArray<DHAppInfo *> *matched;
 @property (nonatomic, strong) UISearchController *search;
 @property (nonatomic, strong) UISegmentedControl *filter;
+@property (nonatomic, strong) UIView *filterHeader;
 @property (nonatomic, assign) BOOL searching;
-@property (nonatomic, assign) BOOL enabledOnly;
 @property (nonatomic, copy, nullable) NSString *freshLatest;   // App 自己刚查到的线上版本
 @property (nonatomic, strong) NSMutableArray<NSString *> *pendingRestart;   // 改了开关但还没重启的 App
 @property (nonatomic, copy) NSDictionary<NSString *, NSDictionary *> *injected;  // 本机 8088 探测到的已注入 App
@@ -44,10 +46,17 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     self.tableView.sectionIndexMinimumDisplayRowCount = 12;
 
-    self.filter = [[UISegmentedControl alloc] initWithItems:@[ @"全部", @"已启用" ]];
+    self.title = @"插件注入";
+    self.filter = [[UISegmentedControl alloc]
+        initWithItems:@[ @"所有应用", @"用户应用", @"巨魔应用", @"系统应用" ]];
     self.filter.selectedSegmentIndex = 0;
     [self.filter addTarget:self action:@selector(filterChanged) forControlEvents:UIControlEventValueChanged];
-    self.navigationItem.titleView = self.filter;
+    self.filterHeader = [[UIView alloc] initWithFrame:
+        CGRectMake(0, 0, self.tableView.bounds.size.width, 52)];
+    self.filter.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    self.filter.frame = CGRectMake(12, 8, MAX(0, self.filterHeader.bounds.size.width - 24), 36);
+    [self.filterHeader addSubview:self.filter];
+    self.tableView.tableHeaderView = self.filterHeader;
 
     // 齿轮按钮（有新版时带一个小橙点，让用户不必主动去翻设置）
     UIButton *gear = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -111,7 +120,6 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 }
 
 - (void)filterChanged {
-    self.enabledOnly = (self.filter.selectedSegmentIndex == DHFilterEnabled);
     [self rebuild];
     [self.tableView reloadData];
 }
@@ -151,7 +159,10 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 
     NSMutableArray<DHAppInfo *> *pool = [NSMutableArray array];
     for (DHAppInfo *app in self.allApps) {
-        if (self.enabledOnly && ![self.enabled containsObject:app.bundleID]) continue;
+        DHFilter selected = (DHFilter)self.filter.selectedSegmentIndex;
+        if (selected == DHFilterUser && app.category != DHAppCategoryUser) continue;
+        if (selected == DHFilterTroll && app.category != DHAppCategoryTroll) continue;
+        if (selected == DHFilterSystem && app.category != DHAppCategorySystem) continue;
         if (self.searching &&
             ![app.name localizedCaseInsensitiveContainsString:query] &&
             ![app.bundleID localizedCaseInsensitiveContainsString:query]) continue;
@@ -207,10 +218,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 }
 
 - (NSString *)tableView:(__unused UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    // 只留一句真正需要用户做动作的话，放在"已启用"页（管理开关的地方）
-    if (!self.searching && self.enabledOnly && section == 0) {
-        return @"改动需要重启目标 App 才生效；点右侧 ⋯ 可重启或停止。";
-    }
+    (void)section;
     return nil;
 }
 
@@ -235,7 +243,13 @@ typedef NS_ENUM(NSInteger, DHFilter) {
         } else if (self.searching) {
             cell.textLabel.text = @"没有匹配的 App";
         } else {
-            cell.textLabel.text = @"还没有启用任何 App\n在上面搜索，或从列表里打开开关";
+            NSArray<NSString *> *emptyTexts = @[
+                @"没有检测到应用", @"没有检测到用户应用",
+                @"没有检测到巨魔应用", @"没有检测到系统应用",
+            ];
+            NSInteger selected = self.filter.selectedSegmentIndex;
+            cell.textLabel.text = (selected >= 0 && selected < (NSInteger)emptyTexts.count)
+                ? emptyTexts[selected] : emptyTexts.firstObject;
         }
         return cell;
     }
@@ -268,11 +282,13 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     more.menu = [self menuForApp:app];               // 每次重建：菜单内容跟着状态走
 
     cell.textLabel.text = app.name;
+    NSString *baseDetail = [NSString stringWithFormat:@"%@ · %@",
+        DHAppCategoryDisplayName(app.category), app.bundleID];
     BOOL on = [self.enabled containsObject:app.bundleID];
     if ([self.pendingRestart containsObject:app.bundleID]) {
         // 改了开关还没重启：直接标在这一行上，比横幅更贴身
         NSMutableAttributedString *subtitle = [[NSMutableAttributedString alloc]
-            initWithString:app.bundleID
+            initWithString:baseDetail
                 attributes:@{ NSForegroundColorAttributeName: [UIColor secondaryLabelColor] }];
         [subtitle appendAttributedString:[[NSAttributedString alloc]
             initWithString:@"　需重启"
@@ -281,7 +297,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     } else if (on && self.injected[app.bundleID]) {
         NSNumber *port = self.injected[app.bundleID][@"port"];
         NSMutableAttributedString *subtitle = [[NSMutableAttributedString alloc]
-            initWithString:app.bundleID
+            initWithString:baseDetail
                 attributes:@{ NSForegroundColorAttributeName: [UIColor secondaryLabelColor] }];
         NSString *mark = port ? [NSString stringWithFormat:@"　已注入 :%@", port] : @"　已注入";
         [subtitle appendAttributedString:[[NSAttributedString alloc]
@@ -290,7 +306,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
         cell.detailTextLabel.attributedText = subtitle;
     } else if (on && DHAppProcessRunning(app)) {
         NSMutableAttributedString *subtitle = [[NSMutableAttributedString alloc]
-            initWithString:app.bundleID
+            initWithString:baseDetail
                 attributes:@{ NSForegroundColorAttributeName: [UIColor secondaryLabelColor] }];
         [subtitle appendAttributedString:[[NSAttributedString alloc]
             initWithString:@"　未注入"
@@ -298,7 +314,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
         cell.detailTextLabel.attributedText = subtitle;
     } else {
         cell.detailTextLabel.attributedText = nil;
-        cell.detailTextLabel.text = app.bundleID;
+        cell.detailTextLabel.text = baseDetail;
     }
     cell.imageView.image = DHAppListIcon(app.bundleID, app.bundlePath, app.name);
     toggle.on = [self.enabled containsObject:app.bundleID];
