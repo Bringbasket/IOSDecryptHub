@@ -326,8 +326,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     more.menu = [self menuForApp:app];               // 每次重建：菜单内容跟着状态走
 
     cell.textLabel.text = app.name;
-    NSString *baseDetail = [NSString stringWithFormat:@"%@ · %@",
-        DHAppCategoryDisplayName(app.category), app.bundleID];
+    NSString *baseDetail = app.bundleID;
     BOOL on = [self.enabled containsObject:app.bundleID];
     if ([self.pendingRestart containsObject:app.bundleID]) {
         // 改了开关还没重启：直接标在这一行上，比横幅更贴身
