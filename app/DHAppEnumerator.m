@@ -210,6 +210,7 @@ NSArray<DHAppInfo *> *DHInstalledApps(void) {
         app.name = raw[bundleID][@"name"];
         NSString *path = raw[bundleID][@"path"];
         app.bundlePath = path.length ? path : nil;
+        app.indexLetter = DHAppIndexLetter(app.name);
         app.category = dh_category(bundleID, raw[bundleID]);
         [out addObject:app];
     }
@@ -371,12 +372,16 @@ static NSString *dh_bundle_executable(NSString *bundlePath) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
     if (bundlePath.length == 0) return nil;
-    if (cache[bundlePath]) return cache[bundlePath];
+    @synchronized (cache) {
+        if (cache[bundlePath]) return cache[bundlePath];
+    }
     NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
         [bundlePath stringByAppendingPathComponent:@"Info.plist"]];
     NSString *exec = info[@"CFBundleExecutable"];
     if (![exec isKindOfClass:[NSString class]] || exec.length == 0) exec = nil;
-    if (exec) cache[bundlePath] = exec;
+    if (exec) {
+        @synchronized (cache) { cache[bundlePath] = exec; }
+    }
     return exec;
 }
 
@@ -384,6 +389,53 @@ BOOL DHAppProcessRunning(DHAppInfo *app) {
     NSString *exec = dh_bundle_executable(app.bundlePath);
     if (exec.length == 0) return NO;      // 拿不到可执行名就当没在跑：宁可不动作，也不误杀/误启
     return dh_process_running(exec.UTF8String);
+}
+
+NSSet<NSString *> *DHRunningAppBundleIDs(NSArray<DHAppInfo *> *apps) {
+    if (apps.count == 0) return [NSSet set];
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+    size_t len = 0;
+    if (sysctl(mib, 4, NULL, &len, NULL, 0) != 0 || len == 0) return [NSSet set];
+    struct kinfo_proc *procs = malloc(len);
+    if (!procs) return [NSSet set];
+
+    NSMutableSet<NSString *> *names = [NSMutableSet set];
+    NSMutableSet<NSString *> *prefixes = [NSMutableSet set];
+    if (sysctl(mib, 4, procs, &len, NULL, 0) == 0) {
+        size_t count = len / sizeof(struct kinfo_proc);
+        for (size_t i = 0; i < count; i++) {
+            char comm[MAXCOMLEN + 1];
+            memcpy(comm, procs[i].kp_proc.p_comm, MAXCOMLEN);
+            comm[MAXCOMLEN] = '\0';
+            NSString *name = [NSString stringWithUTF8String:comm];
+            if (name.length) [names addObject:name];
+            size_t commLen = strlen(comm);
+            if (commLen >= MAXCOMLEN - 1) {
+                NSString *prefix = [[NSString alloc] initWithBytes:comm
+                    length:MAXCOMLEN - 1 encoding:NSUTF8StringEncoding];
+                if (prefix.length) [prefixes addObject:prefix];
+            }
+        }
+    }
+    free(procs);
+
+    NSMutableSet<NSString *> *running = [NSMutableSet set];
+    for (DHAppInfo *app in apps) {
+        NSString *exec = dh_bundle_executable(app.bundlePath);
+        const char *want = exec.UTF8String;
+        if (!want || !want[0]) continue;
+        size_t wantLen = strlen(want);
+        BOOL found = NO;
+        if (wantLen <= MAXCOMLEN - 1) {
+            found = [names containsObject:exec];
+        } else {
+            NSString *prefix = [[NSString alloc] initWithBytes:want
+                length:MAXCOMLEN - 1 encoding:NSUTF8StringEncoding];
+            found = prefix.length && [prefixes containsObject:prefix];
+        }
+        if (found && app.bundleID.length) [running addObject:app.bundleID];
+    }
+    return running;
 }
 
 BOOL DHKillAppProcess(DHAppInfo *app) {

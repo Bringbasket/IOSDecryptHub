@@ -18,6 +18,7 @@ typedef NS_ENUM(NSInteger, DHAppCategory) {
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic, copy, nullable) NSString *bundlePath;
+@property (nonatomic, copy) NSString *indexLetter;
 @property (nonatomic, assign) DHAppCategory category;
 @end
 
@@ -35,6 +36,8 @@ UIImage *DHAppListIcon(NSString *bundleID, NSString *_Nullable bundlePath, NSStr
 
 /// 该 App 当前是否在运行（按可执行名匹配；越狱环境下本 App 未沙盒化，可枚举进程）
 BOOL DHAppProcessRunning(DHAppInfo *app);
+/// 只枚举一次系统进程，批量返回正在运行的 App bundle ID；用于列表状态刷新。
+NSSet<NSString *> *DHRunningAppBundleIDs(NSArray<DHAppInfo *> *apps);
 /// 结束该 App 进程；杀掉至少一个返回 YES。rootHide 下 daemon 写不了锁文件，重启必须由本 App 自己做。
 BOOL DHKillAppProcess(DHAppInfo *app);
 /// 重新打开 App（LaunchServices / SpringBoardServices / uiopen）。成功返回 YES。

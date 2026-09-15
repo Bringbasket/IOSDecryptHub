@@ -29,6 +29,10 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 @property (nonatomic, strong) UISegmentedControl *filter;
 @property (nonatomic, strong) UIView *filterHeader;
 @property (nonatomic, assign) BOOL searching;
+@property (nonatomic, assign) BOOL appsLoaded;
+@property (nonatomic, assign) BOOL loadingApps;
+@property (nonatomic, assign) BOOL loadingRunningState;
+@property (nonatomic, copy) NSSet<NSString *> *runningBundleIDs;
 @property (nonatomic, copy, nullable) NSString *freshLatest;   // App 自己刚查到的线上版本
 @property (nonatomic, strong) NSMutableArray<NSString *> *pendingRestart;   // 改了开关但还没重启的 App
 @property (nonatomic, copy) NSDictionary<NSString *, NSDictionary *> *injected;  // 本机 8088 探测到的已注入 App
@@ -82,7 +86,6 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self reload];
-    [self prunePendingRestart];
 }
 
 // daemon 每 12 小时查一次；App 打开时若距上次检查超过 6 小时就补一次，
@@ -129,11 +132,48 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 - (void)reload {
     // 有新版本就在齿轮上点个橙点：用户不主动翻设置也能知道
     [self refreshUpdateDot];
-    self.allApps = DHInstalledApps();
     self.enabled = [[DHReadEnabledBundles() mutableCopy] ?: [NSMutableSet set] mutableCopy];
     [self rebuild];
     [self.tableView reloadData];
     [self refreshInjectedStatus];
+    if (!self.appsLoaded) {
+        [self loadAppsInBackground];
+    } else {
+        [self refreshRunningStatus];
+    }
+}
+
+- (void)loadAppsInBackground {
+    if (self.loadingApps) return;
+    self.loadingApps = YES;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSArray<DHAppInfo *> *apps = DHInstalledApps();
+        NSSet<NSString *> *running = DHRunningAppBundleIDs(apps);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.allApps = apps;
+            self.runningBundleIDs = running;
+            self.appsLoaded = YES;
+            self.loadingApps = NO;
+            [self rebuild];
+            [self prunePendingRestart];
+            [self.tableView reloadData];
+        });
+    });
+}
+
+- (void)refreshRunningStatus {
+    if (self.loadingRunningState || self.allApps.count == 0) return;
+    self.loadingRunningState = YES;
+    NSArray<DHAppInfo *> *apps = self.allApps;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSSet<NSString *> *running = DHRunningAppBundleIDs(apps);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.runningBundleIDs = running;
+            self.loadingRunningState = NO;
+            [self prunePendingRestart];
+            [self.tableView reloadData];
+        });
+    });
 }
 
 - (void)refreshInjectedStatus {
@@ -182,13 +222,13 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 
     // 按（首字母, 名称）排序后分组；中文名字用拼音首字母
     NSArray<DHAppInfo *> *sorted = [pool sortedArrayUsingComparator:^NSComparisonResult(DHAppInfo *l, DHAppInfo *r) {
-        NSComparisonResult byLetter = [DHAppIndexLetter(l.name) compare:DHAppIndexLetter(r.name)];
+        NSComparisonResult byLetter = [l.indexLetter compare:r.indexLetter];
         return byLetter != NSOrderedSame ? byLetter : [l.name localizedCaseInsensitiveCompare:r.name];
     }];
     NSString *current = nil;
     NSMutableArray<DHAppInfo *> *bucket = nil;
     for (DHAppInfo *app in sorted) {
-        NSString *letter = DHAppIndexLetter(app.name);
+        NSString *letter = app.indexLetter;
         if (![letter isEqualToString:current]) {
             if (bucket) { [sections addObject:bucket]; [headers addObject:current]; [indexes addObject:current]; }
             bucket = [NSMutableArray array];
@@ -205,7 +245,9 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 
 #pragma mark - 表格
 
-- (NSInteger)numberOfSectionsInTableView:(__unused UITableView *)tableView { return self.sections.count; }
+- (NSInteger)numberOfSectionsInTableView:(__unused UITableView *)tableView {
+    return self.sections.count > 0 ? self.sections.count : 1;
+}
 
 - (NSInteger)tableView:(__unused UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     return self.sections.count == 0 ? 1 : self.sections[section].count;   // 空态占一行
@@ -238,7 +280,9 @@ typedef NS_ENUM(NSInteger, DHFilter) {
         cell.textLabel.textColor = [UIColor secondaryLabelColor];
         cell.textLabel.font = [UIFont systemFontOfSize:14];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        if (self.allApps.count == 0) {
+        if (!self.appsLoaded) {
+            cell.textLabel.text = @"正在载入应用…";
+        } else if (self.allApps.count == 0) {
             cell.textLabel.text = @"未能读取已安装应用";
         } else if (self.searching) {
             cell.textLabel.text = @"没有匹配的 App";
@@ -304,7 +348,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
             initWithString:mark
                 attributes:@{ NSForegroundColorAttributeName: [UIColor systemGreenColor] }]];
         cell.detailTextLabel.attributedText = subtitle;
-    } else if (on && DHAppProcessRunning(app)) {
+    } else if (on && [self.runningBundleIDs containsObject:app.bundleID]) {
         NSMutableAttributedString *subtitle = [[NSMutableAttributedString alloc]
             initWithString:baseDetail
                 attributes:@{ NSForegroundColorAttributeName: [UIColor secondaryLabelColor] }];
@@ -433,7 +477,7 @@ typedef NS_ENUM(NSInteger, DHFilter) {
     // 目标本来就没在运行的话不用提醒 —— 下次打开自然是新状态。
     NSString *selfBundle = [[NSBundle mainBundle] bundleIdentifier];
     BOOL isSelf = [app.bundleID isEqualToString:selfBundle];
-    if (!isSelf && DHAppProcessRunning(app)) {
+    if (!isSelf && [self.runningBundleIDs containsObject:app.bundleID]) {
         [self markPendingRestart:app.bundleID];
     } else {
         [self clearPendingRestart:app.bundleID];
@@ -473,12 +517,12 @@ typedef NS_ENUM(NSInteger, DHFilter) {
 
 // 每次进入界面时清理：已经不在运行的 App 不用再提醒（下次打开自然是新状态）
 - (void)prunePendingRestart {
-    NSMutableDictionary<NSString *, DHAppInfo *> *map = [NSMutableDictionary dictionary];
-    for (DHAppInfo *app in self.allApps) map[app.bundleID] = app;
+    NSMutableSet<NSString *> *installed = [NSMutableSet set];
+    for (DHAppInfo *app in self.allApps) [installed addObject:app.bundleID];
     BOOL changed = NO;
     for (NSString *bundleID in [self.pendingRestart copy]) {
-        DHAppInfo *app = map[bundleID];
-        if (!app || !DHAppProcessRunning(app)) {
+        if (![installed containsObject:bundleID] ||
+            ![self.runningBundleIDs containsObject:bundleID]) {
             [self.pendingRestart removeObject:bundleID];
             changed = YES;
         }

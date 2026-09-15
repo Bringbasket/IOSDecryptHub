@@ -38,6 +38,13 @@
     <true/>
     <key>MinimumOSVersion</key>
     <string>14.0</string>
+    <key>UILaunchScreen</key>
+    <dict>
+        <key>UIImageName</key>
+        <string>Icon</string>
+        <key>UIImageRespectsSafeAreaInsets</key>
+        <true/>
+    </dict>
     <key>UIDeviceFamily</key>
     <array>
         <integer>1</integer>
