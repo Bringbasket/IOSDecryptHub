@@ -55,6 +55,7 @@ error() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 command -v dpkg-deb >/dev/null 2>&1 || error "需要 dpkg-deb (brew install dpkg)"
 command -v xcrun >/dev/null 2>&1 || error "需要 Xcode (xcrun)"
 command -v ldid >/dev/null 2>&1 || error "需要 ldid (brew install ldid)"
+command -v python3 >/dev/null 2>&1 || error "需要 python3（用于处理内嵌 Web UI）"
 [ -n "$VERSION" ] || error "无法读取 Makefile VERSION"
 
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
@@ -68,6 +69,7 @@ APP_ENTITLEMENTS="$SCRIPT_DIR/app/entitlements.plist"
 DAEMON_SRC="$SCRIPT_DIR/daemon/main.m"
 DAEMON_PLIST_TMPL="$SCRIPT_DIR/daemon/com.iosdecrypthub.updated.plist"
 REPO_KEY="$SCRIPT_DIR/repo/iosdecrypthub-archive-keyring.gpg"
+WEB_UI_PATCHER="$SCRIPT_DIR/tools/remove_web_wechat.py"
 APP_NAME="IOSDecryptHubManager"
 DAEMON_BIN="IOSDecryptHubUpdated"
 
@@ -194,7 +196,11 @@ CTRL
     cp "$LOADER_OUT" "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.dylib"
     cp "$SCRIPT_DIR/Filter.plist" "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.plist"
 
-    cp "$ENGINE_DYLIB" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/decrypt_helper.dylib"
+    local STAGED_ENGINE="$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/decrypt_helper.dylib"
+    cp "$ENGINE_DYLIB" "$STAGED_ENGINE"
+    [ -f "$WEB_UI_PATCHER" ] || error "缺少 Web UI 定制脚本: $WEB_UI_PATCHER"
+    python3 "$WEB_UI_PATCHER" "$STAGED_ENGINE" \
+        || error "$VARIANT 的 Web UI 公众号入口移除失败"
     cp "$SCRIPT_DIR/enabledBundles.default.plist" \
         "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/enabledBundles.default.plist"
     cp "$DAEMON_OUT" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN"
