@@ -47,10 +47,10 @@
 
 // 更新来源：先走 releases/latest 的 302 拿 tag（不耗 GitHub API 配额，共享出口/VPN
 // 用户不会莫名被 403 掐掉），资产地址按发布流程的命名约定拼；命名变化时由 API 兜底。
-#define DH_RELEASE_LATEST @"https://github.com/decrypthub/IOSDecryptHub/releases/latest"
-#define DH_ASSET_FMT      @"https://github.com/decrypthub/IOSDecryptHub/releases/download/%@/decrypt_helper-%@.dylib"
+#define DH_RELEASE_LATEST @"https://github.com/Bringbasket/IOSDecryptHub/releases/latest"
+#define DH_ASSET_FMT      @"https://github.com/Bringbasket/IOSDecryptHub/releases/download/%@/decrypt_helper-%@.dylib"
 // 兜底：API 能拿到资产列表，容忍引擎改名
-#define DH_GITHUB_LATEST  @"https://api.github.com/repos/decrypthub/IOSDecryptHub/releases/latest"
+#define DH_GITHUB_LATEST  @"https://api.github.com/repos/Bringbasket/IOSDecryptHub/releases/latest"
 
 #define DH_REQ_CHECK      @"check"
 #define DH_REQ_INSTALL    @"install"
