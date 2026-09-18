@@ -33,6 +33,9 @@ def main() -> int:
         if already_hidden:
             print(f"Web UI WeChat entry already hidden ({already_hidden} occurrence(s))")
             return 0
+        if b"id='wechatBtn'" not in data and b'id="wechatBtn"' not in data:
+            print("Web UI WeChat entry is absent; no patch needed")
+            return 0
         raise SystemExit("embedded Web UI WeChat entry was not found")
 
     patched = data.replace(SOURCE, REPLACEMENT)
