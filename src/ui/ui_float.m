@@ -3,6 +3,8 @@
 #import "http_server.h"
 #import "log_store.h"
 #import "dh_health.h"
+
+NSData *dh_host_app_icon_png(void) { return nil; }
 #import <UIKit/UIKit.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
