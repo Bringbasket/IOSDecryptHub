@@ -466,6 +466,8 @@ static BOOL dh_can_show_floating(void) {
     return [UIApplication sharedApplication].applicationState == UIApplicationStateActive;
 }
 
+static void dh_try_show_floating(void);
+
 static void dh_schedule_install_retries(void) {
     NSArray<NSNumber *> *delays = @[@0.05, @0.20, @0.50, @1.0, @2.0, @3.5, @5.0];
     for (NSNumber *delay in delays) {
