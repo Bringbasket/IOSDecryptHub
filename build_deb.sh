@@ -1,13 +1,13 @@
 #!/bin/bash
 # build_deb.sh — 打包 IOSDecryptHub rootless / roothide 越狱 deb
 #
-# dylib:
-#   vendor/dylib/rootless/decrypt_helper.dylib   (arm64)
-#   vendor/dylib/roothide/decrypt_helper.dylib   (arm64 + arm64e)
+# dylib（引擎，由本仓 src/ 编译后落在 vendor/ 下，不入版本库）:
+#   vendor/dylib/rootless/decrypt_helper.dylib   VARIANT=rootless, arm64
+#   vendor/dylib/roothide/decrypt_helper.dylib   VARIANT=roothide, arm64 + arm64e
 #
 # 包内组件:
 #   IOSDecryptHubLoader.dylib  ElleKit 注入加载器（读名单 → dlopen 引擎，无 hook）
-#   decrypt_helper.dylib       闭源引擎（vendor 成品）
+#   decrypt_helper.dylib       运行时分析引擎（本仓 src/ 编译产物）
 #   IOSDecryptHubManager.app   管理器 App（唯一入口：应用开关 / 更新 / 关于）
 #   IOSDecryptHubUpdated       updater daemon，一次性进程（检查/安装/回滚），见 AGENTS.md
 #
@@ -140,8 +140,9 @@ require_vendor_dylib() {
     local VARIANT="$1"
     local EXPECTED_ARCH="$2"
     local DYLIB="$VENDOR_DIR/$VARIANT/decrypt_helper.dylib"
-    [ -f "$DYLIB" ] || error "缺少成品 dylib: $DYLIB
-请先由私有仓执行 make deb，或手动把对应架构的 decrypt_helper.dylib 放到该路径。"
+    [ -f "$DYLIB" ] || error "缺少引擎: $DYLIB
+请先在仓库根目录执行 make deb（会自动编译引擎并落到 vendor/dylib/），
+或手动把对应架构的 decrypt_helper.dylib 放到该路径。"
     verify_macho_arch "$DYLIB" "$EXPECTED_ARCH" "$VARIANT 主 dylib (vendor)"
     echo "$DYLIB"
 }
@@ -253,9 +254,14 @@ DEFAULT_PATH="${PREFIX}/usr/lib/IOSDecryptHub/enabledBundles.default.plist"
 LEGACY_PATH="/var/mobile/Library/Preferences/com.iosdecrypthub.loader.plist"
 mkdir -p "\$CONFIG_DIR"
 LOADER_PREFS="/var/mobile/Library/Preferences/com.iosdecrypthub.loader.plist"
-# 沙盒目标读 jb 这份。升级时以 prefs 覆盖，避免开关已开却仍用旧 jb 名单。
+# 沙盒目标读 jb 这份。默认以 prefs(管理器 UI 写的) 为准; 但如果 jb 侧配置比 prefs 新,
+# 说明有人直接改了 jb 文件(运维/脚本), 就反向同步回 prefs —— 否则手动加的 App 会被静默还原。
 if [ -f "\$LOADER_PREFS" ]; then
-    cp "\$LOADER_PREFS" "\$CONFIG_PATH"
+    if [ -f "\$CONFIG_PATH" ] && [ "\$CONFIG_PATH" -nt "\$LOADER_PREFS" ]; then
+        cp "\$CONFIG_PATH" "\$LOADER_PREFS"
+    else
+        cp "\$LOADER_PREFS" "\$CONFIG_PATH"
+    fi
 elif [ ! -f "\$CONFIG_PATH" ]; then
     if [ -f "\$LEGACY_PATH" ]; then
         cp "\$LEGACY_PATH" "\$CONFIG_PATH"
@@ -296,6 +302,20 @@ if [ ! -f "\$REQUEST_PATH" ]; then
 fi
 chown mobile:mobile "\$REQUEST_PATH" 2>/dev/null || true
 chmod 0644 "\$REQUEST_PATH" 2>/dev/null || true
+# jb config 请求文件：App 一定能写；updated.sh 会在 daemon 前转交到 REQUEST_PATH。
+JB_REQUEST_PATH="${PREFIX}/usr/lib/IOSDecryptHub/config/updater.request.plist"
+if [ ! -f "\$JB_REQUEST_PATH" ]; then
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<plist version="1.0"><dict><key>action</key><string>none</string></dict></plist>' > "\$JB_REQUEST_PATH"
+fi
+chown mobile:mobile "\$JB_REQUEST_PATH" 2>/dev/null || true
+chmod 0666 "\$JB_REQUEST_PATH" 2>/dev/null || true
+# App 共享缓存目录里的请求文件：roothide 下 App 一定可写。
+CACHE_REQUEST_PATH="/var/mobile/Library/Caches/com.iosdecrypthub/updater.request.plist"
+if [ ! -f "\$CACHE_REQUEST_PATH" ]; then
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<plist version="1.0"><dict><key>action</key><string>none</string></dict></plist>' > "\$CACHE_REQUEST_PATH"
+fi
+chown mobile:mobile "\$CACHE_REQUEST_PATH" 2>/dev/null || true
+chmod 0666 "\$CACHE_REQUEST_PATH" 2>/dev/null || true
 # rootHide 在 jbroot=/ 时会把 LaunchDaemon 里的路径改写成 .jbroot-*/...，
 # launchd exec 返回 78（实测）。改用 /bin/sh 执行短路径脚本，
 # WatchPaths 盯 App 实际写入的 /var/mobile（不要走 .jbroot 前缀）。
@@ -312,6 +332,8 @@ printf '%s\n' \
     '<key>WatchPaths</key><array>' \
     '<string>/var/mobile/Library/Preferences/com.iosdecrypthub.updater.request.plist</string>' \
     '<string>/var/mobile/Library/Preferences/com.iosdecrypthub.loader.plist</string>' \
+    '<string>/var/mobile/Library/Caches/com.iosdecrypthub/updater.request.plist</string>' \
+    "<string>${PREFIX}/usr/lib/IOSDecryptHub/config/updater.request.plist</string>" \
     '</array>' \
     '<key>StartInterval</key><integer>43200</integer>' \
     '<key>RunAtLoad</key><false/>' \

@@ -158,6 +158,35 @@ static NSString *_Nullable dh_existing_engine_dir(void) {
     return readable;
 }
 
+// 引擎 dylib 缺失时 dh_existing_engine_dir 会返回 nil，但目录本身可能还在。
+// 这种情况仍要能写 state，让 App 看到“引擎不存在”的错误，而不是静默退出。
+static NSString *_Nullable dh_existing_engine_dir_loose(void) {
+    NSMutableArray<NSString *> *dirs = [NSMutableArray array];
+    [dirs addObject:@"/usr/lib/IOSDecryptHub"];
+    [dirs addObject:@"/var/jb/usr/lib/IOSDecryptHub"];
+    NSString *root = dh_bootstrap_root();
+    if (root.length) {
+        char resolved[PATH_MAX];
+        if (realpath(root.fileSystemRepresentation, resolved)) {
+            NSString *real = [NSString stringWithUTF8String:resolved];
+            if (real.length && ![real isEqualToString:@"/"]) {
+                [dirs addObject:[real stringByAppendingPathComponent:@"usr/lib/IOSDecryptHub"]];
+            }
+        }
+        if (![root isEqualToString:@"/"]) {
+            [dirs addObject:[root stringByAppendingPathComponent:@"usr/lib/IOSDecryptHub"]];
+        }
+    }
+    for (NSString *dir in dirs) {
+        int fd = open(dir.fileSystemRepresentation, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            close(fd);
+            return dir;
+        }
+    }
+    return nil;
+}
+
 #pragma mark - 单实例锁
 
 // launchd 的 WatchPaths 与 StartInterval 可能叠在一起触发。并发改写引擎 =
@@ -893,64 +922,105 @@ static void dh_do_rollback(void) {
     dh_log("回滚到 %s 完成", ((NSString *)bakVersion).UTF8String);
 }
 
-#pragma mark - 请求处理
-
-static BOOL dh_write_request_plist(NSDictionary *request) {
-    if (!dh_write_plist(request, DH_REQUEST_PATH)) return NO;
-    // daemon 以 root 运行；原子 rename 后新 inode 会继承 root 身份，必须还给管理器。
-    chown(DH_REQUEST_PATH.fileSystemRepresentation, 501, 501);
-    chmod(DH_REQUEST_PATH.fileSystemRepresentation, 0644);
-    return YES;
-}
-
-static void dh_do_set_enabled(id rawBundles) {
-    if (![rawBundles isKindOfClass:[NSArray class]] || [(NSArray *)rawBundles count] > 4096) {
-        dh_record_op(DH_REQ_SET_ENABLED, nil, @"error", @"启用名单格式无效", nil);
-        dh_log("启用名单格式无效，拒绝写入");
-        return;
-    }
-
-    NSMutableSet<NSString *> *unique = [NSMutableSet set];
-    for (id item in (NSArray *)rawBundles) {
-        if (![item isKindOfClass:[NSString class]] || [(NSString *)item length] == 0 ||
-            [(NSString *)item length] > 255) {
-            dh_record_op(DH_REQ_SET_ENABLED, nil, @"error", @"启用名单包含无效 bundle id", nil);
-            dh_log("启用名单包含无效 bundle id，拒绝写入");
-            return;
+static void dh_do_set_enabled(id raw) {
+    NSMutableArray<NSString *> *bundles = [NSMutableArray array];
+    if ([raw isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)raw) {
+            if (![item isKindOfClass:[NSString class]]) continue;
+            NSString *bid = item;
+            if (bid.length == 0 || bid.length > 256) continue;
+            [bundles addObject:bid];
+            if (bundles.count >= 4096) break;
         }
-        [unique addObject:item];
     }
-
-    NSArray<NSString *> *values = [[unique allObjects] sortedArrayUsingSelector:@selector(compare:)];
-    NSString *path = [g_engine_dir stringByAppendingPathComponent:@"config/enabledBundles.plist"];
-    if (!dh_write_plist(@{DH_KEY_BUNDLES: values}, path)) {
-        dh_record_op(DH_REQ_SET_ENABLED, nil, @"error", @"写入启用名单失败", nil);
-        dh_log("写入启用名单失败: %s", path.UTF8String);
-        return;
+    [bundles sortUsingSelector:@selector(compare:)];
+    NSString *dir = [g_engine_dir stringByAppendingPathComponent:@"config"];
+    NSString *path = [dir stringByAppendingPathComponent:@"enabledBundles.plist"];
+    mkdir(dir.fileSystemRepresentation, 0777);
+    NSError *serErr = nil;
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:@{DH_KEY_BUNDLES: bundles}
+        format:NSPropertyListXMLFormat_v1_0 options:0 error:&serErr];
+    BOOL ok = NO;
+    if (data) {
+        NSString *tmp = [path stringByAppendingString:@".new"];
+        int fd = open(tmp.fileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+        if (fd >= 0) {
+            const uint8_t *buf = data.bytes;
+            NSUInteger left = data.length;
+            BOOL wrote = YES;
+            while (left) {
+                ssize_t n = write(fd, buf, left);
+                if (n <= 0) { wrote = NO; break; }
+                buf += (NSUInteger)n;
+                left -= (NSUInteger)n;
+            }
+            fsync(fd);
+            close(fd);
+            if (wrote && rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation) == 0) {
+                ok = YES;
+            } else {
+                unlink(tmp.fileSystemRepresentation);
+            }
+        }
     }
-    chown(path.fileSystemRepresentation, 501, 501);
-    chmod(path.fileSystemRepresentation, 0644);
-    dh_record_op(DH_REQ_SET_ENABLED, nil, @"ok", nil, nil);
-    dh_log("启用名单已保存，共 %lu 项", (unsigned long)values.count);
+    if (ok) {
+        chown(dir.fileSystemRepresentation, 501, 501);
+        chown(path.fileSystemRepresentation, 501, 501);
+        chmod(dir.fileSystemRepresentation, 0777);
+        chmod(path.fileSystemRepresentation, 0666);
+        dh_log("已写入启用名单 %lu 项", (unsigned long)bundles.count);
+        dh_record_op(DH_REQ_SET_ENABLED, nil, @"ok", nil, nil);
+    } else {
+        dh_log("写入启用名单失败: %s", path.UTF8String ?: "");
+        dh_record_op(DH_REQ_SET_ENABLED, nil, @"error", @"write failed", nil);
+    }
 }
+
+#pragma mark - 请求处理
 
 static void dh_ensure_request_file(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     if ([fm fileExistsAtPath:DH_REQUEST_PATH]) return;
-    dh_write_request_plist(@{@"action": DH_REQ_NONE});
+    dh_write_plist(@{@"action": DH_REQ_NONE}, DH_REQUEST_PATH);
+    chown(DH_REQUEST_PATH.fileSystemRepresentation, 501, 501); // mobile
+    chmod(DH_REQUEST_PATH.fileSystemRepresentation, 0644);
 }
 
 static void dh_process_request(void) {
     dh_ensure_request_file();
     NSMutableDictionary *req = [(dh_read_plist(DH_REQUEST_PATH) ?: @{}) mutableCopy];
     NSString *action = req[@"action"];
+    BOOL fromLoaderPrefs = NO;
+    if (![action isKindOfClass:[NSString class]] || [action isEqualToString:DH_REQ_NONE]) {
+        // roothide: App 的 /var/mobile 写入可能落在容器视图，request 文件到不了
+        // daemon。loader prefs 是 App 与 daemon 都稳定使用的通道，这里兜底读取。
+        NSString *loaderPath = dh_jb_path(@"var/mobile/Library/Preferences/com.iosdecrypthub.loader.plist");
+        if (!loaderPath.length) loaderPath = DH_LOADER_PREFS;
+        NSDictionary *loader = dh_read_plist(loaderPath) ?: dh_read_plist(DH_LOADER_PREFS);
+        NSDictionary *pending = loader[@"updaterRequest"];
+        if ([pending isKindOfClass:[NSDictionary class]]) {
+            req = [pending mutableCopy];
+            action = req[@"action"];
+            fromLoaderPrefs = YES;
+        }
+    }
     if (![action isKindOfClass:[NSString class]] || [action isEqualToString:DH_REQ_NONE]) {
         return;
     }
     // 先清零再执行：本次写入会再次触发 WatchPaths，但下次进来 action=none 直接返回，不会循环
     req[@"action"] = DH_REQ_NONE;
-    dh_write_request_plist(req);
-    dh_log("处理请求: %s", action.UTF8String);
+    if (fromLoaderPrefs) {
+        NSString *loaderPath = dh_jb_path(@"var/mobile/Library/Preferences/com.iosdecrypthub.loader.plist");
+        if (!loaderPath.length) loaderPath = DH_LOADER_PREFS;
+        NSMutableDictionary *loader = [(dh_read_plist(loaderPath) ?: @{}) mutableCopy];
+        [loader removeObjectForKey:@"updaterRequest"];
+        dh_write_plist(loader, loaderPath);
+        chown(loaderPath.fileSystemRepresentation, 501, 501);
+        chmod(loaderPath.fileSystemRepresentation, 0644);
+    } else {
+        dh_write_plist(req, DH_REQUEST_PATH);
+    }
+    dh_log("处理请求: %s%s", action.UTF8String, fromLoaderPrefs ? " (loader-prefs)" : "");
     if ([action isEqualToString:DH_REQ_CHECK]) {
         dh_do_check();
     } else if ([action isEqualToString:DH_REQ_INSTALL]) {
@@ -972,7 +1042,7 @@ static void dh_process_request(void) {
     }
     req[@"lastAction"] = action;
     req[@"time"] = @([[NSDate date] timeIntervalSince1970]);
-    dh_write_request_plist(req);
+    dh_write_plist(req, DH_REQUEST_PATH);
 }
 
 static void dh_periodic_check(void) {
@@ -991,6 +1061,21 @@ int main(int argc, char *argv[]) {
         dh_log("启动");
         g_engine_dir = dh_existing_engine_dir();
         if (!g_engine_dir) {
+            NSString *fallbackDir = dh_existing_engine_dir_loose();
+            if (fallbackDir.length) {
+                NSDictionary *state = @{
+                    @"lastOp": @{
+                        @"kind": @"install",
+                        @"result": @"error",
+                        @"error": @"引擎不存在",
+                        @"time": @([[NSDate date] timeIntervalSince1970]),
+                    },
+                };
+                NSString *statePath = [fallbackDir stringByAppendingPathComponent:DH_STATE_FILE];
+                if (dh_write_plist(state, statePath)) {
+                    chmod(statePath.fileSystemRepresentation, 0644);
+                }
+            }
             dh_log("引擎目录不存在，退出");
             return 0;
         }
