@@ -1,546 +1,383 @@
-// ui_float.m
-// 悬浮窗 - 只显示采集状态、Web 地址和基础控制，不承载日志正文。
-//
-// 产品决定（2026-09-13）：悬浮窗不带任何引流内容（曾有的"微信搜一搜"整行已移除）。
-// Web 面板里的公众号入口是渠道触达，保留，不要在"清理"时一起删掉。
-//
-// UIKit 隔离: macOS 纯 target 没有 UIKit, 整个文件编译为空, 提供 no-op stub.
-// iOS / Mac Catalyst / iOS Simulator 都有 UIKit, 正常走.
-
 #import "ui_float.h"
-
-#if __has_include(<UIKit/UIKit.h>)
-
-#import <UIKit/UIKit.h>
-#import "log_store.h"
-#import "dh_noise.h"
+#import "dh_shared.h"
 #import "http_server.h"
+#import "log_store.h"
 #import "dh_health.h"
+#import <UIKit/UIKit.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 
-// 夜间设计系统: 黑底 + 高对比白字 + 少量冷蓝点缀
-#define DH_BG       [UIColor colorWithRed:0.035 green:0.039 blue:0.047 alpha:1.0]  // #090a0c
-#define DH_ACCENT   [UIColor colorWithRed:0.969 green:0.973 blue:0.984 alpha:1.0]  // #f7f8fb
-#define DH_INK      [UIColor colorWithRed:0.969 green:0.973 blue:0.984 alpha:1.0]  // #f7f8fb
-#define DH_MUTED    [UIColor colorWithRed:0.690 green:0.722 blue:0.769 alpha:1.0]  // #b0b8c4
-#define DH_LINE     [UIColor colorWithRed:0.255 green:0.290 blue:0.349 alpha:1.0]  // #414a59
-#define DH_SURFACE  [UIColor colorWithRed:0.090 green:0.106 blue:0.133 alpha:1.0]  // #171b22
-#define DH_LINK     [UIColor colorWithRed:0.541 green:0.706 blue:1.000 alpha:1.0]  // #8ab4ff
-#define DH_WARN     [UIColor colorWithRed:0.941 green:0.718 blue:0.435 alpha:1.0]  // #f0b76f
-#define DH_DANGER   [UIColor colorWithRed:1.000 green:0.608 blue:0.722 alpha:1.0]  // #ff9bb8
-
-// 前向声明 (定义在文件后部)
-static UIWindowScene *dh_best_window_scene(void);
-
-@interface DHFloatingController : NSObject
-@property (nonatomic, strong) UIWindow    *window;
-@property (nonatomic, strong) UIView      *bar;
-@property (nonatomic, strong) UIView      *cardView;   // 黑白卡片底 (白底黑边)
-@property (nonatomic, strong) UILabel     *titleLabel;
-@property (nonatomic, strong) UIButton    *minBtn;
-@property (nonatomic, strong) UIImageView *collapsedIcon;   // 缩小态的圆形小图标
-@property (nonatomic, strong) UILabel     *statsLabel;
-@property (nonatomic, strong) UILabel     *urlLabel;
-@property (nonatomic, strong) UIButton    *clearBtn;
-@property (nonatomic, strong) UIButton    *pauseBtn;
-@property (nonatomic, strong) NSTimer     *statsTimer;
-@property (nonatomic, assign) BOOL         collapsed;
-@property (nonatomic, assign) CGRect       expandedFrame;
-@property (nonatomic, assign) BOOL         sceneObserversInstalled;
-- (void)attachToBestScene;
+@interface DHPassthroughWindow : UIWindow
 @end
 
-static void dh_schedule_install_retries(void);
+@implementation DHPassthroughWindow
 
-static DHFloatingController *gFloat = nil;
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    UIView *root = self.rootViewController.view;
+    return hit == self || hit == root ? nil : hit;
+}
+
+@end
+
+static NSString *DHDeviceIPv4Address(void) {
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0 || !interfaces) return @"127.0.0.1";
+    NSString *fallback = nil;
+    for (struct ifaddrs *cursor = interfaces; cursor; cursor = cursor->ifa_next) {
+        if (!cursor->ifa_addr || cursor->ifa_addr->sa_family != AF_INET) continue;
+        if (!(cursor->ifa_flags & IFF_UP) || (cursor->ifa_flags & IFF_LOOPBACK)) continue;
+        char buffer[INET_ADDRSTRLEN] = {0};
+        struct sockaddr_in *address = (struct sockaddr_in *)cursor->ifa_addr;
+        if (!inet_ntop(AF_INET, &address->sin_addr, buffer, sizeof(buffer))) continue;
+        NSString *value = [NSString stringWithUTF8String:buffer];
+        NSString *name = cursor->ifa_name ? [NSString stringWithUTF8String:cursor->ifa_name] : @"";
+        if ([name isEqualToString:@"en0"]) {
+            fallback = value;
+            break;
+        }
+        if (!fallback.length) fallback = value;
+    }
+    freeifaddrs(interfaces);
+    return fallback.length ? fallback : @"127.0.0.1";
+}
+
+static UIWindowScene *DHForegroundWindowScene(void) API_AVAILABLE(ios(13.0)) {
+    UIWindowScene *fallback = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        UIWindowScene *windowScene = (UIWindowScene *)scene;
+        if (scene.activationState == UISceneActivationStateForegroundActive) return windowScene;
+        if (!fallback && scene.activationState == UISceneActivationStateForegroundInactive) fallback = windowScene;
+    }
+    return fallback;
+}
+
+@interface DHFloatingController : NSObject
+@property (nonatomic, strong) DHPassthroughWindow *overlayWindow;
+@property (nonatomic, weak) UIWindowScene *attachedScene;
+@property (nonatomic, strong) UIButton *bubble;
+@property (nonatomic, strong) UILabel *badgeLabel;
+@property (nonatomic, strong) UIView *panel;
+@property (nonatomic, strong) UILabel *statsLabel;
+@property (nonatomic, strong) UILabel *urlLabel;
+@property (nonatomic, strong) UILabel *statusLabel;
+@property (nonatomic, strong) UIButton *pauseButton;
+@property (nonatomic, strong) NSTimer *refreshTimer;
+@end
 
 @implementation DHFloatingController
 
-- (instancetype)init {
-    if ((self = [super init])) {
-        [self build];
-    }
-    return self;
++ (instancetype)sharedController {
+    static DHFloatingController *controller;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ controller = [DHFloatingController new]; });
+    return controller;
 }
 
-// 创建悬浮窗并绑定到最佳 scene; 无 scene 时降级到 mainScreen (旧 UIKit)
-- (UIWindow *)createFloatingWindow {
-    UIWindowScene *scene = dh_best_window_scene();
-    if (scene) {
-        return [[UIWindow alloc] initWithWindowScene:scene];
-    }
-    // 旧 UIKit 无 Scene Manifest: 直接用 screen 创建
-    return [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-}
-
-- (void)attachToBestScene {
-    if (!self.window) return;
-    if (@available(iOS 13.0, *)) {
-        UIWindowScene *scene = dh_best_window_scene();
-        if (scene && self.window.windowScene != scene) {
-            self.window.windowScene = scene;
+- (void)start {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+        [center addObserver:self selector:@selector(applicationBecameActive:)
+                       name:UIApplicationDidBecomeActiveNotification object:nil];
+        [center addObserver:self selector:@selector(applicationBecameActive:)
+                       name:UIApplicationWillEnterForegroundNotification object:nil];
+        [center addObserver:self selector:@selector(applicationBecameActive:)
+                       name:UIWindowDidBecomeKeyNotification object:nil];
+        if (@available(iOS 13.0, *)) {
+            [center addObserver:self selector:@selector(applicationBecameActive:)
+                           name:UISceneDidActivateNotification object:nil];
+            [center addObserver:self selector:@selector(applicationBecameActive:)
+                           name:UISceneWillEnterForegroundNotification object:nil];
         }
-    }
-    self.window.hidden = NO;
-    // 不要 makeKeyAndVisible：会抢走宿主 key window，宿主恢复焦点后悬浮窗被盖住或丢掉
-}
-
-- (void)ensureWindowAttached {
-    if (!self.window) return;
-    UIWindowScene *scene = dh_best_window_scene();
-    if (@available(iOS 13.0, *)) {
-        if (scene && self.window.windowScene != scene) {
-            self.window.hidden = YES;
-            self.window.windowScene = scene;
-        }
-    }
-    [self attachToBestScene];
-}
-
-- (void)build {
-    CGRect screen = [UIScreen mainScreen].bounds;
-    CGFloat W = 252, H = 202;
-    // 初始贴右上, 顶部避开灵动岛/刘海 (保守安全值, 拖动后随用户)
-    CGRect frame = CGRectMake(screen.size.width - W - 12, 64, W, H);
-    self.expandedFrame = frame;
-
-    UIWindow *w = [self createFloatingWindow];
-    w.frame = frame;
-    w.windowLevel = UIWindowLevelAlert + 1000;
-    w.backgroundColor = [UIColor clearColor];
-    w.layer.cornerRadius = 8;
-    w.layer.masksToBounds = YES;
-    w.rootViewController = [UIViewController new];
-    w.rootViewController.view.backgroundColor = [UIColor clearColor];
-    self.window = w;
-    UIView *root = w.rootViewController.view;
-
-    // 夜间卡片: 近黑底 + 1pt 浅描边 (不再用深色毛玻璃)
-    UIView *card = [[UIView alloc] initWithFrame:CGRectMake(0, 0, W, H)];
-    card.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    card.backgroundColor = DH_BG;
-    card.layer.cornerRadius = 8;
-    card.layer.masksToBounds = YES;
-    card.layer.borderWidth = 1.0;
-    card.layer.borderColor = DH_ACCENT.CGColor;
-    [root addSubview:card];
-    self.cardView = card;
-
-    // 缩小态的圆形小图标 (SF Symbol 钥匙, 渲染可靠, 不依赖 emoji), 展开态隐藏
-    UIImageView *icon = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, W, H)];
-    if (@available(iOS 13.0, *)) {
-        UIImageSymbolConfiguration *cfg =
-            [UIImageSymbolConfiguration configurationWithPointSize:24 weight:UIImageSymbolWeightSemibold];
-        icon.image = [UIImage systemImageNamed:@"key.fill" withConfiguration:cfg];
-    }
-    icon.tintColor = DH_ACCENT;
-    icon.contentMode = UIViewContentModeCenter;
-    icon.alpha = 0;
-    self.collapsedIcon = icon;
-    [root addSubview:icon];
-
-    // 标题栏 (透明, 铺在深色卡面上)
-    UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, W, 40)];
-    bar.backgroundColor = [UIColor clearColor];
-    bar.userInteractionEnabled = YES;
-    self.bar = bar;
-    [root addSubview:bar];
-
-    self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 9, 170, 22)];
-    self.titleLabel.text = @"IOSDecryptHub";
-    self.titleLabel.textColor = DH_ACCENT;
-    self.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-    [bar addSubview:self.titleLabel];
-
-    self.minBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.minBtn.frame = CGRectMake(W - 44, 4, 40, 32);   // 44pt 触控区
-    [self.minBtn setTitle:@"–" forState:UIControlStateNormal];
-    [self.minBtn setTitleColor:DH_MUTED forState:UIControlStateNormal];
-    self.minBtn.titleLabel.font = [UIFont systemFontOfSize:24 weight:UIFontWeightMedium];
-    [self.minBtn addTarget:self action:@selector(toggleCollapsed) forControlEvents:UIControlEventTouchUpInside];
-    [bar addSubview:self.minBtn];
-
-    // 拖动手势 + 缩小态点击展开
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
-    [bar addGestureRecognizer:pan];
-    UITapGestureRecognizer *barTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onBarTap)];
-    [bar addGestureRecognizer:barTap];
-    // 缩小态整个圆形图标也可点击展开
-    UITapGestureRecognizer *iconTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(onBarTap)];
-    icon.userInteractionEnabled = YES;
-    [icon addGestureRecognizer:iconTap];
-
-    // 统计文本
-    self.statsLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 48, W - 28, 52)];
-    self.statsLabel.numberOfLines = 0;
-    self.statsLabel.textColor = DH_INK;
-    self.statsLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    [root addSubview:self.statsLabel];
-
-    // URL 一行: http://ip:port  (点击复制)
-    self.urlLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 104, W - 28, 36)];
-    self.urlLabel.numberOfLines = 2;
-    self.urlLabel.textColor = DH_LINK;
-    self.urlLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
-    self.urlLabel.adjustsFontSizeToFitWidth = YES;
-    self.urlLabel.minimumScaleFactor = 0.7;
-    self.urlLabel.userInteractionEnabled = YES;
-    self.urlLabel.text = @"(本地服务启动中…)";
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self
-                                                                          action:@selector(onCopyURL)];
-    [self.urlLabel addGestureRecognizer:tap];
-    [root addSubview:self.urlLabel];
-
-    // App 内只保留基础控制，日志查看与分析统一在 Web 控制台完成。
-    CGFloat by = 142, bw = 109, bh = 40, bx = 12, gap = 10;
-    self.pauseBtn = [self makeButton:@"暂停" style:1
-                               frame:CGRectMake(bx, by, bw, bh) action:@selector(onTogglePause)];
-    self.clearBtn = [self makeButton:@"清空" style:2
-                               frame:CGRectMake(bx + bw + gap, by, bw, bh) action:@selector(onClear)];
-    [root addSubview:self.pauseBtn];
-    [root addSubview:self.clearBtn];
-
-    w.hidden = NO;
-    [self attachToBestScene];
-
-    // 定时刷新统计 (1 秒) — block + weak self, 避免 retain cycle; 缩小态不刷新
-    __weak typeof(self) weakSelf = self;
-    self.statsTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) { [t invalidate]; return; }
-        if (strongSelf.collapsed) return;
-        [strongSelf refreshStats];
-    }];
-    [self refreshStats];
-}
-
-- (UIButton *)makeButton:(NSString *)t style:(int)style frame:(CGRect)f action:(SEL)sel {
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    b.frame = f;
-    [b setTitle:t forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    b.layer.cornerRadius = 8;
-    b.layer.borderWidth = 1.0;
-    if (style == 0) {
-        // 主操作: 浅底深字 (夜间反白)
-        b.backgroundColor = DH_ACCENT;
-        [b setTitleColor:DH_BG forState:UIControlStateNormal];
-        b.layer.borderColor = DH_ACCENT.CGColor;
-    } else if (style == 1) {
-        // 次操作: 深灰底浅字
-        b.backgroundColor = DH_SURFACE;
-        [b setTitleColor:DH_WARN forState:UIControlStateNormal];
-        b.layer.borderColor = DH_WARN.CGColor;
-    } else {
-        // 危险操作: 深底危险色描边
-        b.backgroundColor = DH_BG;
-        [b setTitleColor:DH_DANGER forState:UIControlStateNormal];
-        b.layer.borderColor = DH_DANGER.CGColor;
-    }
-    [b addTarget:self action:sel forControlEvents:UIControlEventTouchUpInside];
-    return b;
-}
-
-// URL 行样式: 正常 = 冷蓝; 异常 = 浅底深字反白 (fail-loud, 不再用红/蓝)
-- (void)applyUrlStyle:(BOOL)error {
-    if (error) {
-        self.urlLabel.backgroundColor = DH_ACCENT;
-        self.urlLabel.textColor = DH_BG;
-        self.urlLabel.layer.cornerRadius = 6;
-        self.urlLabel.layer.masksToBounds = YES;
-    } else {
-        self.urlLabel.backgroundColor = [UIColor clearColor];
-        self.urlLabel.textColor = DH_LINK;
-        self.urlLabel.layer.cornerRadius = 0;
-    }
-}
-
-- (void)refreshStats {
-    DHLogStore *s = [DHLogStore shared];
-    NSUInteger d = [s countForCategory:DHCategoryDigest];
-    NSUInteger h = [s countForCategory:DHCategoryHMAC];
-    NSUInteger sym = [s countForCategory:DHCategorySymmetric];
-    NSUInteger asym = [s countForCategory:DHCategoryAsymmetric];
-    NSUInteger file = [s countForCategory:DHCategoryFile];
-    NSUInteger sys = [s countForCategory:DHCategorySystem];
-    NSUInteger noiseCrypto = [s noiseCountForBoard:DHNoiseBoardCrypto];
-    NSUInteger noiseSys    = [s noiseCountForBoard:DHNoiseBoardSys];
-    NSString *state = s.paused ? @"已暂停" : @"运行中";
-    self.statsLabel.text = [NSString stringWithFormat:
-        @"%@  总 %lu\n摘要 %lu  HMAC %lu  对称 %lu  RSA %lu\n系统 %lu  加密噪声 %lu  系统噪声 %lu",
-        state, (unsigned long)[s totalCount],
-        (unsigned long)d, (unsigned long)h, (unsigned long)sym, (unsigned long)asym,
-        (unsigned long)(file + sys), (unsigned long)noiseCrypto, (unsigned long)noiseSys];
-
-    // fail-loud: 把健康状态显示出来 —— 服务失败/hook未挂上/落盘失败都用红字明示,
-    // 而不是恒显"启动中…"假装一切正常.
-    const char *hc = dh_health_summary();
-    NSString *health = (hc && hc[0]) ? [NSString stringWithUTF8String:hc] : @"";
-
-    uint16_t port = dh_http_port();
-    if (dh_health_http_failed()) {
-        [self applyUrlStyle:YES];
-        self.urlLabel.text = [NSString stringWithFormat:@"服务失败\n%@", health.length ? health : @"端口被占用"];
-    } else if (port > 0) {
-        NSString *url = dh_http_url();
-        if (dh_health_local_only()) url = [url stringByAppendingString:@" (仅本地)"];
-        if (health.length) {
-            [self applyUrlStyle:YES];
-            self.urlLabel.text = [NSString stringWithFormat:@"%@\n⚠ %@", url, health];
-        } else {
-            [self applyUrlStyle:NO];
-            self.urlLabel.text = [NSString stringWithFormat:@"%@\n(点这里复制)", url];
-        }
-    } else {
-        [self applyUrlStyle:NO];
-        self.urlLabel.text = @"(本地服务启动中…)";
-    }
-}
-
-- (void)onCopyURL {
-    NSString *u = dh_http_url();
-    if (!u || ![u hasPrefix:@"http"]) return;
-    [UIPasteboard generalPasteboard].string = u;
-    NSString *original = self.urlLabel.text;
-    self.urlLabel.text = @"已复制到剪贴板";
-    self.urlLabel.textColor = DH_ACCENT;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        self.urlLabel.textColor = DH_LINK;
-        if ([self.urlLabel.text isEqualToString:@"已复制到剪贴板"]) self.urlLabel.text = original;
+        [self installIfPossible];
+        [self scheduleInstallRetries];
+        self.refreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self
+                                                           selector:@selector(refreshStatus)
+                                                           userInfo:nil repeats:YES];
     });
 }
 
-- (void)onPan:(UIPanGestureRecognizer *)g {
-    CGPoint t = [g translationInView:g.view.window];
-    if (g.state == UIGestureRecognizerStateChanged) {
-        CGRect f = self.window.frame;
-        f.origin.x += t.x;
-        f.origin.y += t.y;
-        CGRect scr = [UIScreen mainScreen].bounds;
-        f.origin.x = MAX(0, MIN(scr.size.width  - f.size.width,  f.origin.x));
-        f.origin.y = MAX(0, MIN(scr.size.height - f.size.height, f.origin.y));
-        self.window.frame = f;
-        if (!self.collapsed) self.expandedFrame = f;
-        [g setTranslation:CGPointZero inView:g.view.window];
-    }
+- (void)applicationBecameActive:(NSNotification *)notification {
+    (void)notification;
+    [self installIfPossible];
+    [self scheduleInstallRetries];
 }
 
-- (void)toggleCollapsed {
-    self.collapsed = !self.collapsed;
-    CGRect target; CGFloat radius;
-    if (self.collapsed) {
-        // 缩小成一个圆形小图标 (54x54)
-        CGFloat D = 54;
-        target = CGRectMake(self.window.frame.origin.x, self.window.frame.origin.y, D, D);
-        radius = D / 2;
-    } else {
-        target = self.expandedFrame;
-        target.origin.x = self.window.frame.origin.x;
-        target.origin.y = self.window.frame.origin.y;
-        radius = 8;
-    }
-    BOOL col = self.collapsed;
-    [UIView animateWithDuration:0.30 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0
-                        options:UIViewAnimationOptionCurveEaseInOut animations:^{
-        self.window.frame = target;
-        self.window.layer.cornerRadius = radius;
-        self.cardView.layer.cornerRadius = radius;
-        self.collapsedIcon.frame = CGRectMake(0, 0, target.size.width, target.size.height);
-        self.collapsedIcon.alpha = col ? 1 : 0;
-        self.titleLabel.alpha = col ? 0 : 1;
-        self.minBtn.alpha     = col ? 0 : 1;
-        self.statsLabel.alpha = col ? 0 : 1;
-        self.urlLabel.alpha   = col ? 0 : 1;
-        self.pauseBtn.alpha   = col ? 0 : 1;
-        self.clearBtn.alpha   = col ? 0 : 1;
-    } completion:nil];
-}
-
-- (void)onBarTap {
-    // 缩小态点击(标题栏或圆形图标)展开; 展开态点击不缩小, 避免误触(缩小用「–」按钮)
-    if (self.collapsed) [self toggleCollapsed];
-}
-
-- (void)onTogglePause {
-    DHLogStore *s = [DHLogStore shared];
-    s.paused = !s.paused;
-    [self.pauseBtn setTitle:s.paused ? @"恢复" : @"暂停" forState:UIControlStateNormal];
-    [self refreshStats];
-}
-
-- (void)onClear {
-    // 二次确认: 文字变 "再点一次", 3 秒内再点才真正清空, 否则恢复
-    if ([self.clearBtn.titleLabel.text isEqualToString:@"再点一次"]) {
-        [[DHLogStore shared] clearAll];
-        [self.clearBtn setTitle:@"清空" forState:UIControlStateNormal];
-        [self refreshStats];
-        return;
-    }
-    [self.clearBtn setTitle:@"再点一次" forState:UIControlStateNormal];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if ([self.clearBtn.titleLabel.text isEqualToString:@"再点一次"]) {
-            [self.clearBtn setTitle:@"清空" forState:UIControlStateNormal];
-        }
-    });
-}
-
-@end
-
-// ---------------------------------------------------------------------------
-// 生命周期管理
-//
-// 覆盖场景:
-//   - UIScene 前台 App (iOS 13+, 含 SwiftUI)
-//   - 没有 Scene Manifest 的旧 UIKit App (iOS 13 以下或 UIApplicationSceneManifest 缺失)
-//   - iPad 多窗口切换 (scene 断开/重连)
-//   - 横竖屏旋转
-//   - scene 从后台恢复
-//
-// 策略: 注册通知 → 找到前台 UIWindowScene → 创建/迁移悬浮窗。
-// 找不到前台 scene 时降级到 UIApplicationStateActive + 现有 UIWindow。
-// ---------------------------------------------------------------------------
-
-// 读取宿主被注入 App 的图标 -> PNG (best-effort): 优先 CFBundleIcons 里最大的一张,
-// 退化尝试常见 AppIcon 名。imageNamed 能从 Assets.car 读出真机图标。
-NSData *dh_host_app_icon_png(void) {
-    UIImage *icon = nil;
-    NSBundle *mb = [NSBundle mainBundle];
-    NSDictionary *icons = [mb objectForInfoDictionaryKey:@"CFBundleIcons"];
-    NSArray *files = icons[@"CFBundlePrimaryIcon"][@"CFBundleIconFiles"];
-    for (NSString *n in [files reverseObjectEnumerator]) {
-        UIImage *i = [UIImage imageNamed:n];
-        if (i) { icon = i; break; }
-    }
-    if (!icon) {
-        for (NSString *n in @[@"AppIcon60x60", @"AppIcon", @"Icon-60", @"Icon", @"icon"]) {
-            UIImage *i = [UIImage imageNamed:n];
-            if (i) { icon = i; break; }
-        }
-    }
-    if (!icon) return nil;
-    NSData *png = UIImagePNGRepresentation(icon);
-    if (!png || png.length > 200 * 1024) return nil;
-    return png;
-}
-
-// 查找最佳前台 UIWindowScene (iOS 13+)
-static UIWindowScene *dh_best_window_scene(void) {
-    if (@available(iOS 13.0, *)) {
-        // 优先: 前台活跃
-        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-            if ([s isKindOfClass:[UIWindowScene class]]
-                && s.activationState == UISceneActivationStateForegroundActive) {
-                return (UIWindowScene *)s;
-            }
-        }
-        // 次选: 前台非活跃 (即将激活)
-        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-            if ([s isKindOfClass:[UIWindowScene class]]
-                && s.activationState == UISceneActivationStateForegroundInactive) {
-                return (UIWindowScene *)s;
-            }
-        }
-        // 兜底: 任何 UIWindowScene
-        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-            if ([s isKindOfClass:[UIWindowScene class]]) {
-                return (UIWindowScene *)s;
-            }
-        }
-    }
-    return nil;
-}
-
-// 判断当前环境是否可以创建悬浮窗
-static BOOL dh_can_show_floating(void) {
-    if (@available(iOS 13.0, *)) {
-        // 有 scene 支持: 需要至少一个 UIWindowScene
-        if (dh_best_window_scene() != nil) return YES;
-        // 没有 scene (旧 UIKit 无 Scene Manifest): 检查 App 是否活跃
-        if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
-            return YES;
-        }
-        return NO;
-    }
-    // iOS 12 及以下: 无 scene 概念, App 活跃即可
-    return [UIApplication sharedApplication].applicationState == UIApplicationStateActive;
-}
-
-static void dh_try_show_floating(void);
-
-static void dh_schedule_install_retries(void) {
-    NSArray<NSNumber *> *delays = @[@0.05, @0.20, @0.50, @1.0, @2.0, @3.5, @5.0];
+- (void)scheduleInstallRetries {
+    NSArray<NSNumber *> *delays = @[@0.05, @0.20, @0.50, @1.0, @2.0];
     for (NSNumber *delay in delays) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                     (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            dh_try_show_floating();
+            [self installIfPossible];
         });
     }
 }
 
-// 尝试创建悬浮窗 (如果条件满足)
-static void dh_try_show_floating(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (gFloat) {
-            [gFloat attachToBestScene];
-            return;
-        }
-        if (!dh_can_show_floating()) return;
-        gFloat = [[DHFloatingController alloc] init];
-    });
+- (void)installIfPossible {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self installIfPossible]; });
+        return;
+    }
+    UIApplication *application = UIApplication.sharedApplication;
+    if (!application) return;
+    UIWindowScene *scene = nil;
+    if (@available(iOS 13.0, *)) scene = DHForegroundWindowScene();
+    if (self.overlayWindow && (!scene || self.attachedScene == scene)) {
+        [self refreshStatus];
+        return;
+    }
+    [self.overlayWindow resignKeyWindow];
+    self.overlayWindow.hidden = YES;
+    self.overlayWindow = nil;
+    self.attachedScene = scene;
+
+    CGRect bounds = scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
+    DHPassthroughWindow *window;
+    if (@available(iOS 13.0, *)) {
+        window = scene ? [[DHPassthroughWindow alloc] initWithWindowScene:scene]
+                       : [[DHPassthroughWindow alloc] initWithFrame:bounds];
+    } else {
+        window = [[DHPassthroughWindow alloc] initWithFrame:bounds];
+    }
+    window.frame = bounds;
+    window.backgroundColor = UIColor.clearColor;
+    window.windowLevel = UIWindowLevelAlert + 96.0;
+    UIViewController *rootController = [UIViewController new];
+    rootController.view.backgroundColor = UIColor.clearColor;
+    window.rootViewController = rootController;
+    self.overlayWindow = window;
+    [self buildInterfaceInView:rootController.view];
+    [rootController.view setNeedsLayout];
+    [rootController.view layoutIfNeeded];
+    window.hidden = NO;
+    [self refreshStatus];
 }
 
-// 通知回调: scene 激活 / App 活跃 / 方向变化
-static void dh_on_scene_activated(NSNotification *note) {
-    (void)note;
-    dh_try_show_floating();
-    dh_schedule_install_retries();
+- (UIButton *)actionButtonWithTitle:(NSString *)title selector:(SEL)selector {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    [button setTitle:title forState:UIControlStateNormal];
+    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    button.backgroundColor = [UIColor colorWithRed:0.16 green:0.19 blue:0.27 alpha:1.0];
+    button.layer.cornerRadius = 9.0;
+    [button addTarget:self action:selector forControlEvents:UIControlEventTouchUpInside];
+    return button;
 }
 
-static void dh_on_app_did_become_active(NSNotification *note) {
-    (void)note;
-    dh_try_show_floating();
-    dh_schedule_install_retries();
+- (void)buildInterfaceInView:(UIView *)rootView {
+    CGFloat size = 54.0;
+    CGRect bounds = rootView.bounds;
+    UIButton *bubble = [UIButton buttonWithType:UIButtonTypeCustom];
+    bubble.frame = CGRectMake(MAX(12.0, CGRectGetWidth(bounds) - size - 18.0),
+                              MAX(100.0, CGRectGetHeight(bounds) * 0.28), size, size);
+    bubble.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleBottomMargin;
+    bubble.backgroundColor = [UIColor colorWithRed:0.38 green:0.30 blue:0.95 alpha:0.96];
+    bubble.layer.cornerRadius = size / 2.0;
+    bubble.layer.borderWidth = 1.0;
+    bubble.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.25].CGColor;
+    bubble.layer.shadowColor = UIColor.blackColor.CGColor;
+    bubble.layer.shadowOpacity = 0.30;
+    bubble.layer.shadowRadius = 8.0;
+    bubble.layer.shadowOffset = CGSizeMake(0, 3);
+    [bubble setTitle:@"DH" forState:UIControlStateNormal];
+    [bubble setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    bubble.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
+    bubble.accessibilityLabel = @"Decrypt Helper 浮动控制台";
+    [bubble addTarget:self action:@selector(togglePanel) forControlEvents:UIControlEventTouchUpInside];
+    [bubble addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragBubble:)]];
+    [rootView addSubview:bubble];
+    self.bubble = bubble;
+
+    UILabel *badge = [[UILabel alloc] initWithFrame:CGRectMake(size - 17.0, -3.0, 21.0, 21.0)];
+    badge.backgroundColor = [UIColor colorWithRed:0.96 green:0.30 blue:0.38 alpha:1.0];
+    badge.textColor = UIColor.whiteColor;
+    badge.font = [UIFont monospacedDigitSystemFontOfSize:9 weight:UIFontWeightBold];
+    badge.textAlignment = NSTextAlignmentCenter;
+    badge.layer.cornerRadius = 10.5;
+    badge.layer.masksToBounds = YES;
+    badge.userInteractionEnabled = NO;
+    [bubble addSubview:badge];
+    self.badgeLabel = badge;
+
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 306.0, 224.0)];
+    panel.backgroundColor = [UIColor colorWithRed:0.055 green:0.067 blue:0.105 alpha:0.97];
+    panel.layer.cornerRadius = 17.0;
+    panel.layer.borderWidth = 1.0;
+    panel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.12].CGColor;
+    panel.layer.shadowColor = UIColor.blackColor.CGColor;
+    panel.layer.shadowOpacity = 0.34;
+    panel.layer.shadowRadius = 14.0;
+    panel.layer.shadowOffset = CGSizeMake(0, 5);
+    panel.hidden = YES;
+    [rootView addSubview:panel];
+    self.panel = panel;
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 238, 25)];
+    title.text = @"Decrypt Helper";
+    title.textColor = UIColor.whiteColor;
+    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
+    [panel addSubview:title];
+
+    UIButton *close = [self actionButtonWithTitle:@"×" selector:@selector(togglePanel)];
+    close.frame = CGRectMake(262, 9, 32, 30);
+    close.titleLabel.font = [UIFont systemFontOfSize:21 weight:UIFontWeightRegular];
+    close.backgroundColor = UIColor.clearColor;
+    [panel addSubview:close];
+
+    UILabel *stats = [[UILabel alloc] initWithFrame:CGRectMake(16, 43, 274, 21)];
+    stats.textColor = [UIColor colorWithRed:0.72 green:0.76 blue:0.86 alpha:1.0];
+    stats.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightRegular];
+    [panel addSubview:stats];
+    self.statsLabel = stats;
+
+    UILabel *url = [[UILabel alloc] initWithFrame:CGRectMake(16, 66, 274, 34)];
+    url.textColor = [UIColor colorWithRed:0.50 green:0.72 blue:1.0 alpha:1.0];
+    url.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+    url.numberOfLines = 2;
+    url.lineBreakMode = NSLineBreakByCharWrapping;
+    [panel addSubview:url];
+    self.urlLabel = url;
+
+    UIButton *open = [self actionButtonWithTitle:@"打开 Web" selector:@selector(openWebConsole)];
+    UIButton *copy = [self actionButtonWithTitle:@"复制 URL" selector:@selector(copyWebURL)];
+    UIButton *pause = [self actionButtonWithTitle:@"暂停采集" selector:@selector(togglePause)];
+    UIButton *clear = [self actionButtonWithTitle:@"清空事件" selector:@selector(clearEvents)];
+    clear.backgroundColor = [UIColor colorWithRed:0.42 green:0.15 blue:0.19 alpha:1.0];
+    pause.frame = CGRectZero;
+    self.pauseButton = pause;
+
+    UIStackView *rowOne = [[UIStackView alloc] initWithArrangedSubviews:@[open, copy]];
+    rowOne.axis = UILayoutConstraintAxisHorizontal;
+    rowOne.distribution = UIStackViewDistributionFillEqually;
+    rowOne.spacing = 8.0;
+    UIStackView *rowTwo = [[UIStackView alloc] initWithArrangedSubviews:@[pause, clear]];
+    rowTwo.axis = UILayoutConstraintAxisHorizontal;
+    rowTwo.distribution = UIStackViewDistributionFillEqually;
+    rowTwo.spacing = 8.0;
+    UIStackView *actions = [[UIStackView alloc] initWithArrangedSubviews:@[rowOne, rowTwo]];
+    actions.frame = CGRectMake(16, 105, 274, 78);
+    actions.axis = UILayoutConstraintAxisVertical;
+    actions.distribution = UIStackViewDistributionFillEqually;
+    actions.spacing = 8.0;
+    [panel addSubview:actions];
+
+    UILabel *status = [[UILabel alloc] initWithFrame:CGRectMake(16, 190, 274, 20)];
+    status.textColor = [UIColor colorWithWhite:0.66 alpha:1.0];
+    status.font = [UIFont systemFontOfSize:11];
+    status.textAlignment = NSTextAlignmentCenter;
+    [panel addSubview:status];
+    self.statusLabel = status;
+    [self placePanel];
 }
 
-// 安装通知监听 + 首次尝试
+- (NSString *)webURLString {
+    return dh_http_url() ?: [NSString stringWithFormat:@"http://%@:%u/", DHDeviceIPv4Address(), dh_http_port()];
+}
+
+- (void)refreshStatus {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self refreshStatus]; });
+        return;
+    }
+    if (!self.overlayWindow) return;
+    NSUInteger count = [DHLogStore shared].totalCount;
+    self.badgeLabel.text = count > 99 ? @"99+" : [NSString stringWithFormat:@"%lu", (unsigned long)count];
+    self.badgeLabel.hidden = count == 0;
+    self.statsLabel.text = [NSString stringWithFormat:@"PID %d  ·  %lu events  ·  port %u",
+                            NSProcessInfo.processInfo.processIdentifier, (unsigned long)count, dh_http_port()];
+    self.urlLabel.text = [self webURLString];
+    BOOL paused = [DHLogStore shared].paused;
+    [self.pauseButton setTitle:paused ? @"继续采集" : @"暂停采集" forState:UIControlStateNormal];
+    self.pauseButton.backgroundColor = paused
+        ? [UIColor colorWithRed:0.52 green:0.34 blue:0.10 alpha:1.0]
+        : [UIColor colorWithRed:0.16 green:0.19 blue:0.27 alpha:1.0];
+    self.bubble.accessibilityValue = [NSString stringWithFormat:@"%lu 个事件，%@",
+                                      (unsigned long)count, paused ? @"已暂停" : @"采集中"];
+}
+
+- (void)togglePanel {
+    self.panel.hidden = !self.panel.hidden;
+    self.statusLabel.text = @"";
+    [self placePanel];
+    [self refreshStatus];
+}
+
+- (void)dragBubble:(UIPanGestureRecognizer *)recognizer {
+    UIView *root = self.overlayWindow.rootViewController.view;
+    CGPoint translation = [recognizer translationInView:root];
+    self.bubble.center = CGPointMake(self.bubble.center.x + translation.x, self.bubble.center.y + translation.y);
+    [recognizer setTranslation:CGPointZero inView:root];
+    if (recognizer.state == UIGestureRecognizerStateEnded || recognizer.state == UIGestureRecognizerStateCancelled) {
+        UIEdgeInsets insets = root.safeAreaInsets;
+        CGFloat half = CGRectGetWidth(self.bubble.bounds) / 2.0;
+        CGFloat minX = insets.left + half + 8.0;
+        CGFloat maxX = CGRectGetWidth(root.bounds) - insets.right - half - 8.0;
+        CGFloat minY = insets.top + half + 8.0;
+        CGFloat maxY = CGRectGetHeight(root.bounds) - insets.bottom - half - 8.0;
+        CGPoint center = self.bubble.center;
+        center.x = MIN(MAX(center.x, minX), maxX);
+        center.y = MIN(MAX(center.y, minY), maxY);
+        center.x = center.x < CGRectGetMidX(root.bounds) ? minX : maxX;
+        [UIView animateWithDuration:0.18 animations:^{ self.bubble.center = center; [self placePanel]; }];
+    } else {
+        [self placePanel];
+    }
+}
+
+- (void)placePanel {
+    if (!self.panel || !self.bubble) return;
+    UIView *root = self.overlayWindow.rootViewController.view;
+    CGRect bounds = root.bounds;
+    CGFloat width = MIN(306.0, CGRectGetWidth(bounds) - 24.0);
+    CGRect frame = self.panel.frame;
+    frame.size.width = width;
+    CGFloat x = CGRectGetMidX(self.bubble.frame) < CGRectGetMidX(bounds)
+        ? CGRectGetMaxX(self.bubble.frame) + 8.0
+        : CGRectGetMinX(self.bubble.frame) - width - 8.0;
+    if (x < 12.0 || x + width > CGRectGetWidth(bounds) - 12.0) {
+        x = MIN(MAX(12.0, CGRectGetMidX(self.bubble.frame) - width / 2.0), CGRectGetWidth(bounds) - width - 12.0);
+    }
+    CGFloat y = CGRectGetMidY(self.bubble.frame) - frame.size.height / 2.0;
+    UIEdgeInsets insets = root.safeAreaInsets;
+    y = MIN(MAX(y, insets.top + 8.0), CGRectGetHeight(bounds) - insets.bottom - frame.size.height - 8.0);
+    frame.origin = CGPointMake(x, y);
+    self.panel.frame = frame;
+}
+
+- (void)showStatus:(NSString *)text {
+    self.statusLabel.text = text;
+}
+
+- (void)copyWebURL {
+    UIPasteboard.generalPasteboard.string = [self webURLString];
+    [self showStatus:@"Web 地址已复制"];
+}
+
+- (void)openWebConsole {
+    NSURL *url = [NSURL URLWithString:[self webURLString]];
+    if (!url) return;
+    [UIApplication.sharedApplication openURL:url options:@{} completionHandler:^(BOOL success) {
+        [self showStatus:success ? @"已打开浏览器" : @"无法打开浏览器"];
+    }];
+}
+
+- (void)togglePause {
+    DHLogStore *store = [DHLogStore shared];
+    store.paused = !store.paused;
+    [self refreshStatus];
+}
+
+- (void)clearEvents {
+    [[DHLogStore shared] clearAll];
+    [self showStatus:@"事件已清空"];
+    [self refreshStatus];
+}
+
+@end
+
 void dh_ui_install_floating(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        // 注册通知 (幂等: 只在第一次安装)
-        static BOOL notifications_installed = NO;
-        if (!notifications_installed) {
-            notifications_installed = YES;
-            NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
-
-            if (@available(iOS 13.0, *)) {
-                // UIScene 激活 (覆盖 SwiftUI / 标准 UIKit / iPad 多窗口)
-                [nc addObserverForName:UISceneDidActivateNotification
-                                object:nil queue:[NSOperationQueue mainQueue]
-                            usingBlock:^(NSNotification *note_) { dh_on_scene_activated(note_); }];
-                [nc addObserverForName:UISceneDidDisconnectNotification
-                                object:nil queue:[NSOperationQueue mainQueue]
-                            usingBlock:^(NSNotification *note_) { dh_on_scene_activated(note_); }];
-            }
-
-            // 旧 UIKit 无 Scene Manifest 的兜底
-            [nc addObserverForName:UIApplicationDidBecomeActiveNotification
-                            object:nil queue:[NSOperationQueue mainQueue]
-                        usingBlock:^(NSNotification *note_) { dh_on_app_did_become_active(note_); }];
-        }
-
-        // 首次尝试 (可能 App 已经活跃)
-        dh_try_show_floating();
-
-        // 如果首次失败, 延迟重试几次 (覆盖启动慢的 App)
-        dh_schedule_install_retries();
-    });
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ [[DHFloatingController sharedController] start]; });
 }
-
-#else  // !__has_include(<UIKit/UIKit.h>)
-
-// 纯 macOS target 下没有 UIKit, 提供空 stub - 浏览器看 web 面板就够了.
-void dh_ui_install_floating(void) {}
-NSData *dh_host_app_icon_png(void) { return nil; }
-
-#endif
