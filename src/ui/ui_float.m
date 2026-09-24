@@ -1,5 +1,5 @@
 #import "ui_float.h"
-#import "dh_shared.h"
+#import "../dh_shared.h"
 #import "http_server.h"
 #import "log_store.h"
 #import "dh_health.h"
