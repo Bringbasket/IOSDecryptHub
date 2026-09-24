@@ -45,8 +45,11 @@ static UIWindowScene *dh_best_window_scene(void);
 @property (nonatomic, strong) NSTimer     *statsTimer;
 @property (nonatomic, assign) BOOL         collapsed;
 @property (nonatomic, assign) CGRect       expandedFrame;
+@property (nonatomic, assign) BOOL         sceneObserversInstalled;
 - (void)attachToBestScene;
 @end
+
+static void dh_schedule_install_retries(void);
 
 static DHFloatingController *gFloat = nil;
 
@@ -79,6 +82,18 @@ static DHFloatingController *gFloat = nil;
     }
     self.window.hidden = NO;
     // 不要 makeKeyAndVisible：会抢走宿主 key window，宿主恢复焦点后悬浮窗被盖住或丢掉
+}
+
+- (void)ensureWindowAttached {
+    if (!self.window) return;
+    UIWindowScene *scene = dh_best_window_scene();
+    if (@available(iOS 13.0, *)) {
+        if (scene && self.window.windowScene != scene) {
+            self.window.hidden = YES;
+            self.window.windowScene = scene;
+        }
+    }
+    [self attachToBestScene];
 }
 
 - (void)build {
@@ -451,6 +466,17 @@ static BOOL dh_can_show_floating(void) {
     return [UIApplication sharedApplication].applicationState == UIApplicationStateActive;
 }
 
+static void dh_schedule_install_retries(void) {
+    NSArray<NSNumber *> *delays = @[@0.05, @0.20, @0.50, @1.0, @2.0, @3.5, @5.0];
+    for (NSNumber *delay in delays) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            dh_try_show_floating();
+        });
+    }
+}
+
 // 尝试创建悬浮窗 (如果条件满足)
 static void dh_try_show_floating(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -467,11 +493,13 @@ static void dh_try_show_floating(void) {
 static void dh_on_scene_activated(NSNotification *note) {
     (void)note;
     dh_try_show_floating();
+    dh_schedule_install_retries();
 }
 
 static void dh_on_app_did_become_active(NSNotification *note) {
     (void)note;
     dh_try_show_floating();
+    dh_schedule_install_retries();
 }
 
 // 安装通知监听 + 首次尝试
@@ -503,15 +531,7 @@ void dh_ui_install_floating(void) {
         dh_try_show_floating();
 
         // 如果首次失败, 延迟重试几次 (覆盖启动慢的 App)
-        if (!gFloat) {
-            for (int delay_ms = 500; delay_ms <= 3000; delay_ms += 500) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                    (int64_t)(delay_ms * NSEC_PER_MSEC)),
-                    dispatch_get_main_queue(), ^{
-                    dh_try_show_floating();
-                });
-            }
-        }
+        dh_schedule_install_retries();
     });
 }
 
