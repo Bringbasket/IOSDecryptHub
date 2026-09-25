@@ -890,6 +890,65 @@ static ssize_t (*orig_dh_write)(int, const void *, size_t) = NULL;
 
 static _Thread_local uint8_t g_dh_iov_buf[DH_NET_PAYLOAD_MAX];
 
+// 视频/直播 App 会并发重试同一批 CDN 域名，失败解析尤其容易每秒产生成百上千条事件。
+// DNS 只用于补充「访问过哪些主机」，逐调用记录既没有额外取证价值，还会被调用栈放大内存。
+// 因此按 node+service+结果做 60 秒去重，并限制每进程每分钟最多 120 个不同 DNS 事件。
+#define DH_DNS_CACHE_SIZE 512
+#define DH_DNS_DEDUP_MS (60ULL * 1000ULL)
+#define DH_DNS_WINDOW_MS (60ULL * 1000ULL)
+#define DH_DNS_MAX_PER_WINDOW 120
+
+typedef struct {
+    uint64_t hash;
+    uint64_t lastMs;
+} DHDNSCacheSlot;
+
+static DHDNSCacheSlot g_dh_dns_cache[DH_DNS_CACHE_SIZE];
+static pthread_mutex_t g_dh_dns_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_dh_dns_window_start;
+static uint32_t g_dh_dns_emitted;
+static uint32_t g_dh_dns_suppressed;
+
+static uint64_t dh_dns_hash(const char *node, const char *service, int result) {
+    uint64_t h = 1469598103934665603ULL;
+    const unsigned char *p = (const unsigned char *)(node ? node : "");
+    for (size_t i = 0; p[i] && i < 1024; i++) { h ^= p[i]; h *= 1099511628211ULL; }
+    h ^= 0xff; h *= 1099511628211ULL;
+    p = (const unsigned char *)(service ? service : "");
+    for (size_t i = 0; p[i] && i < 64; i++) { h ^= p[i]; h *= 1099511628211ULL; }
+    h ^= (uint32_t)result; h *= 1099511628211ULL;
+    return h ? h : 1;
+}
+
+static BOOL dh_dns_should_emit(const char *node, const char *service, int result,
+                               uint32_t *previouslySuppressed) {
+    uint64_t now = dh_now_ms();
+    uint64_t hash = dh_dns_hash(node, service, result);
+    BOOL emit = NO;
+    uint32_t summary = 0;
+    pthread_mutex_lock(&g_dh_dns_lock);
+    if (!g_dh_dns_window_start) g_dh_dns_window_start = now;
+    if (now < g_dh_dns_window_start || now - g_dh_dns_window_start >= DH_DNS_WINDOW_MS) {
+        summary = g_dh_dns_suppressed;
+        g_dh_dns_window_start = now;
+        g_dh_dns_emitted = 0;
+        g_dh_dns_suppressed = 0;
+    }
+    DHDNSCacheSlot *slot = &g_dh_dns_cache[hash % DH_DNS_CACHE_SIZE];
+    BOOL duplicate = slot->hash == hash && now >= slot->lastMs && now - slot->lastMs < DH_DNS_DEDUP_MS;
+    if (!duplicate && g_dh_dns_emitted < DH_DNS_MAX_PER_WINDOW) {
+        slot->hash = hash;
+        slot->lastMs = now;
+        g_dh_dns_emitted++;
+        emit = YES;
+    } else {
+        g_dh_dns_suppressed++;
+    }
+    pthread_mutex_unlock(&g_dh_dns_lock);
+    if (previouslySuppressed) *previouslySuppressed = summary;
+    return emit;
+}
+
 static size_t dh_net_collect_iov(const struct iovec *iov, int iovcnt, size_t limit, uint8_t *out) {
     if (!iov || iovcnt <= 0 || !out || limit == 0) return 0;
     size_t total = 0;
@@ -938,9 +997,18 @@ static int hooked_dh_getaddrinfo(const char *node, const char *service,
                                  const struct addrinfo *hints, struct addrinfo **res) {
     int r = orig_dh_getaddrinfo ? orig_dh_getaddrinfo(node, service, hints, res) : EAI_FAIL;
     if (dh_capture_sub_enabled(DH_CAP_NETWORK) && node && node[0]) {
-        net_log(@"DNS", @"resolve",
-                [NSString stringWithFormat:@"%s%s%s rc=%d", node,
-                 (service && service[0]) ? " " : "", (service && service[0]) ? service : "", r], nil);
+        uint32_t suppressed = 0;
+        BOOL emit = dh_dns_should_emit(node, service, r, &suppressed);
+        if (suppressed) {
+            net_log(@"DNS", @"summary",
+                    [NSString stringWithFormat:@"suppressed %u duplicate/rate-limited lookups in previous 60s",
+                     suppressed], nil);
+        }
+        if (emit) {
+            net_log(@"DNS", @"resolve",
+                    [NSString stringWithFormat:@"%s%s%s rc=%d", node,
+                     (service && service[0]) ? " " : "", (service && service[0]) ? service : "", r], nil);
+        }
     }
     return r;
 }
