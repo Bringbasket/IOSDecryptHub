@@ -11,8 +11,9 @@ extern "C" {
 // 只使用 ObjC runtime swizzle，不进入 WebContent/Networking 进程。
 void dh_install_webkit_hooks(void);
 
-// P1 可选 JS 网络探针配置 (默认关闭)。confPath = Documents/.dh_webkit_probe.conf。
-void dh_webkit_probe_load(NSString *confPath);
+// JS 网络探针配置。enabledByManager 是管理器功能开关的单一启动门控；
+// confPath 仅保留脱敏和域名过滤等细项，不会反向覆盖管理器开关。
+void dh_webkit_probe_load(NSString *confPath, BOOL enabledByManager);
 NSDictionary *dh_webkit_probe_snapshot(void);
 void dh_webkit_probe_set_config(NSDictionary *changes);
 BOOL dh_webkit_probe_enabled(void);

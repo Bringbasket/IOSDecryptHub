@@ -37,6 +37,7 @@
 #import "dh_log_json.h"
 #import "mcp_server.h"
 #import "hook_network.h"
+#import "dh_collector.h"
 
 #define DH_HTTP_PORT_FIRST  8088
 #define DH_HTTP_PORT_LAST   8108
@@ -199,6 +200,7 @@ static void handle_stats(int fd) {
         @"version":     @DH_HTTP_VERSION,
         @"logBytes":    @(logBytes),
         @"pipeline":    [s pipelineStats],   // 背压/丢弃/RSS: 用于长时间运行稳定性观测
+        @"collector":   dh_collector_status(),
         @"noiseCount":  @[@([s noiseCountForBoard:DHNoiseBoardCrypto]), @([s noiseCountForBoard:DHNoiseBoardSys])],
         @"noiseEnabled": @[@(dh_noise_enabled_for_board(DHNoiseBoardCrypto)), @(dh_noise_enabled_for_board(DHNoiseBoardSys))],
         @"process":     [s processInfo],
@@ -786,6 +788,27 @@ static void handle_index(int fd) {
     send_response(fd, 200, @"OK", @"text/html; charset=utf-8", body);
 }
 
+static void handle_collector_info(int fd) {
+    send_json(fd, 200, dh_collector_info());
+}
+
+static void handle_collector_status(int fd) {
+    send_json(fd, 200, dh_collector_status());
+}
+
+static void handle_collector_ingest(int fd, NSString *body) {
+    NSData *data = [body dataUsingEncoding:NSUTF8StringEncoding];
+    id object = data.length ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    if (!object) { send_json(fd, 400, @{@"error": @"invalid JSON"}); return; }
+    NSString *error = nil;
+    if (!dh_collector_ingest(object, &error)) {
+        send_json(fd, 400, @{@"error": error ?: @"invalid collector envelope"});
+        return;
+    }
+    NSUInteger count = [object isKindOfClass:[NSArray class]] ? [object count] : 1;
+    send_json(fd, 202, @{@"accepted": @(count)});
+}
+
 static void handle_wechat_png(int fd) {
     NSData *body = [NSData dataWithBytes:kDHWeChatPNG length:kDHWeChatPNG_len];
     send_response(fd, 200, @"OK", @"image/png", body);
@@ -911,6 +934,10 @@ static void handle_connection(int fd) {
                 handle_files_preview(fd, q);
             } else if ([path isEqualToString:@"/api/files/download"]) {
                 handle_files_download(fd, q);
+            } else if ([path isEqualToString:@"/api/collector/info"]) {
+                handle_collector_info(fd);
+            } else if ([path isEqualToString:@"/api/collector/status"]) {
+                handle_collector_status(fd);
             } else if ([path isEqualToString:@"/favicon.ico"]) {
                 send_response(fd, 204, @"No Content", @"image/x-icon", [NSData data]);
             } else if ([path isEqualToString:@"/api/mcp"]) {
@@ -940,6 +967,8 @@ static void handle_connection(int fd) {
                 handle_config_set(fd, q);
             } else if ([path isEqualToString:@"/api/dump"]) {
                 handle_dump_start(fd, q);
+            } else if ([path isEqualToString:@"/api/collector/ingest"]) {
+                handle_collector_ingest(fd, reqBody);
             } else if ([path isEqualToString:@"/api/mcp"]) {
                 handle_mcp(fd, reqBody, acceptsSSE);
             } else {

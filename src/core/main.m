@@ -1,6 +1,6 @@
 // main.m - IOSDecryptHub (Decrypt Helper)
 // 注入入口：普通 App 按管理器功能开关安装模块并初始化悬浮窗；
-// com.apple.WebKit.Networking 复用同一引擎，但只启动低层网络采集与 Web 服务。
+// com.apple.WebKit.Networking 复用同一引擎，但只启动低层网络采集并汇总到目标 App 服务。
 
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
@@ -19,6 +19,7 @@
 #import "dh_spoof.h"
 #import "hook_network.h"
 #import "hook_webkit.h"
+#import "dh_collector.h"
 
 extern void dh_install_digest_hooks(void);
 extern void dh_install_hmac_hooks(void);
@@ -173,6 +174,7 @@ static void dh_bootstrap(void) {
         if (webKitProcess && !dh_feature(features, DH_FEATURE_WEBKIT_PROCESS)) return;
 
         NSString *docsDir = dh_runtime_data_dir(webKitProcess);
+        dh_collector_configure(webKitProcess);
         if (webKitProcess && docsDir.length) {
             // LogStore 初始化前指定独立目录，避免多个 WebKit Network 进程争用同一日志文件。
             setenv("DH_LOG_DIR", docsDir.fileSystemRepresentation, 1);
@@ -198,13 +200,13 @@ static void dh_bootstrap(void) {
                 dh_diag_append(DH_DIAG_GENERAL, "INFO",
                     "WebKit Networking hooks installed (SSL/SecureTransport/socket/Network.framework)");
             }
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ dh_http_start(); });
-            NSLog(@"[IOSDecryptHub] WebKit Networking 轻量采集已启动");
+            NSLog(@"[IOSDecryptHub] WebKit Networking 轻量采集已启动，事件将汇总到目标 App 面板");
             return;
         }
 
         dh_spoof_load([docsDir stringByAppendingPathComponent:@".dh_spoof.conf"]);
-        dh_webkit_probe_load([docsDir stringByAppendingPathComponent:@".dh_webkit_probe.conf"]);
+        dh_webkit_probe_load([docsDir stringByAppendingPathComponent:@".dh_webkit_probe.conf"],
+                             dh_feature(features, DH_FEATURE_WEBKIT_JS));
     // 安装 hook —— 尽早完成, 否则早期发生的加解密会漏抓.
         dh_install_selected_hooks(features);
         dh_diag_append(DH_DIAG_GENERAL, "INFO", "按管理器功能开关安装 hook 完成");

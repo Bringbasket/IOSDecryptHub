@@ -150,6 +150,15 @@ NSDictionary *dh_log_entry_summary(DHLogEntry *e) {
     } mutableCopy];
     if (statusCode) out[@"statusCode"] = statusCode;
     if (netErr) out[@"netError"] = netErr;
+    if (e.metadata) {
+        out[@"metadata"] = e.metadata;
+        NSString *source = [e.metadata[@"source"] isKindOfClass:[NSString class]] ? e.metadata[@"source"] : nil;
+        NSString *eventName = [e.metadata[@"eventName"] isKindOfClass:[NSString class]] ? e.metadata[@"eventName"] : nil;
+        NSString *requestId = [e.metadata[@"requestId"] isKindOfClass:[NSString class]] ? e.metadata[@"requestId"] : nil;
+        if (source.length) out[@"source"] = source;
+        if (eventName.length) out[@"eventName"] = eventName;
+        if (requestId.length) out[@"requestId"] = requestId;
+    }
     return out;
 }
 

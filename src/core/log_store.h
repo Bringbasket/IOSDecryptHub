@@ -33,6 +33,7 @@ typedef NS_ENUM(NSInteger, DHCategory) {
 @property (nonatomic, copy, nullable) NSData *output;       // 输出 (摘要/密文/明文/签名)
 @property (nonatomic, copy, nullable) NSString *publicKeyInfo;  // RSA 公钥摘要描述
 @property (nonatomic, copy, nullable) NSString *detail;         // 通用详情: 文件路径 / 系统库路径等
+@property (nonatomic, copy, nullable) NSDictionary *metadata;   // JSON-safe 扩展字段: source/eventName/requestId 等
 @property (nonatomic, copy)   NSString *timestamp;          // 格式化时间 (人读)
 @property (nonatomic, assign) uint64_t timestampMs;        // 墙钟毫秒 (epoch), 供时间窗关联; 0=legacy 未采集
 @property (nonatomic, assign) uint64_t threadId;           // 调用线程 id (pthread_threadid_np); 0=legacy

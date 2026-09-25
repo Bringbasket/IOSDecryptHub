@@ -18,6 +18,7 @@ vendor/dylib/*/*.dylib
 # 生成的 Web 资源头文件 (make 自动从 web/ 生成)
 src/server/web_index_html.h
 src/server/web_wechat_png.h
+src/hooks/behavior/webkit_probe_js.h
 
 # inject.sh 中间产物
 work_*/

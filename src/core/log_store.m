@@ -5,6 +5,7 @@
 #import "dh_capability.h"
 #import "dh_noise.h"
 #import "dh_log_json.h"
+#import "dh_collector.h"
 #import <sys/sysctl.h>
 #import <sys/time.h>
 #import <stdatomic.h>
@@ -108,6 +109,10 @@ static NSData *dh_journal_line(DHLogEntry *e) {
     if (e.publicKeyInfo.length) m[@"pk"] = dh_journal_bounded_string(e.publicKeyInfo, 2048);
     if (e.detail.length)        m[@"d"]  = dh_journal_bounded_string(e.detail, kJournalMaxDetailBytes);
     if (e.callStack.length)     m[@"l"]  = dh_journal_bounded_string(e.callStack, kJournalMaxStackBytes);
+    if (e.metadata && [NSJSONSerialization isValidJSONObject:e.metadata]) {
+        NSData *metadataJSON = [NSJSONSerialization dataWithJSONObject:e.metadata options:0 error:nil];
+        if (metadataJSON.length <= 16 * 1024) m[@"x"] = e.metadata;
+    }
     NSData *json = [NSJSONSerialization dataWithJSONObject:m options:0 error:nil];
     if (!json) return nil;
     NSMutableData *out = [NSMutableData dataWithData:json];
@@ -151,6 +156,7 @@ static DHLogEntry *dh_entry_from_journal(NSDictionary *m) {
         detail = detail.length ? [detail stringByAppendingString:suffix] : suffix;
     }
     e.detail = detail;
+    e.metadata = [m[@"x"] isKindOfClass:[NSDictionary class]] ? m[@"x"] : nil;
     e.callStack = [m[@"l"] isKindOfClass:[NSString class]] ? m[@"l"] : @"";
     return e;
 }
@@ -505,6 +511,7 @@ static BOOL dh_noise_entry_matches_board(DHLogEntry *entry, DHNoiseBoard board) 
             if (noisy) self->_noiseCount[board]++;
             else       self->_categoryCounts[ci]++;
             [self _persist:entry noisy:noisy];   // 噪点条目仍照常落盘, 保持「崩溃可闭环取证」承诺
+            if (!noisy) dh_collector_forward_entry(entry, NO);
         } @finally {
             atomic_fetch_sub_explicit(&self->_pendingEvents, 1, memory_order_relaxed);
         }
@@ -551,6 +558,7 @@ static BOOL dh_noise_entry_matches_board(DHLogEntry *entry, DHNoiseBoard board) 
                 newEntry.seq = oldEntry.seq;
                 nb[idx] = newEntry;
                 [self _persist:newEntry noisy:NO];
+                dh_collector_forward_entry(newEntry, YES);
                 return;
             }
             for (int b = 0; b < DHNoiseBoardCount; b++) {   // 也可能被路由进噪声桶
@@ -569,6 +577,7 @@ static BOOL dh_noise_entry_matches_board(DHLogEntry *entry, DHNoiseBoard board) 
                 [nb removeObjectsInRange:NSMakeRange(0, nb.count - self->_maxPerCategory)];
             self->_categoryCounts[DHCategoryNetwork]++;
             [self _persist:newEntry noisy:NO];
+            dh_collector_forward_entry(newEntry, NO);
         } @finally {
             atomic_fetch_sub_explicit(&self->_pendingEvents, 1, memory_order_relaxed);
         }

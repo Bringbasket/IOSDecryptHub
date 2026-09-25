@@ -49,6 +49,7 @@ SRC     := src/core/fishhook.c \
            src/core/dh_spoof.m \
            src/core/dh_symtab.c \
            src/core/dh_dlsym_redirect.c \
+           src/core/dh_collector.m \
            src/core/log_store.m \
            src/core/zip_writer.c \
            src/core/macho_dump.m \
@@ -127,7 +128,8 @@ ARCH_FLAGS := $(foreach A,$(ARCHS),-arch $(A))
 INCLUDES := -Isrc/core -Isrc/core/capstone/include -Isrc/hooks/crypto -Isrc/hooks/behavior -Isrc/server -Isrc/ui
 WEB_HEADER := src/server/web_index_html.h
 WECHAT_HEADER := src/server/web_wechat_png.h
-WEB_ASSETS := $(WEB_HEADER) $(WECHAT_HEADER)
+WEBKIT_PROBE_HEADER := src/hooks/behavior/webkit_probe_js.h
+WEB_ASSETS := $(WEB_HEADER) $(WECHAT_HEADER) $(WEBKIT_PROBE_HEADER)
 
 CFLAGS  := $(ARCH_FLAGS) \
            -isysroot $(SDK) \
@@ -151,6 +153,9 @@ $(WEB_HEADER): web/index.html tools/gen_web.py
 $(WECHAT_HEADER): web/wechat-follow.png tools/gen_web.py
 	python3 tools/gen_web.py web/wechat-follow.png $(WECHAT_HEADER) kDHWeChatPNG
 
+$(WEBKIT_PROBE_HEADER): src/hooks/behavior/webkit_probe.js tools/gen_web.py
+	python3 tools/gen_web.py src/hooks/behavior/webkit_probe.js $(WEBKIT_PROBE_HEADER) kDHWebKitProbeJS
+
 $(TARGET): $(WEB_ASSETS) $(SRC) Makefile
 	@if [ -z "$(SDK)" ]; then echo "❌ 没找到 iPhoneOS SDK (xcrun --sdk iphoneos)"; exit 1; fi
 	@echo "[*] 编译 iOS dylib (VARIANT=$(VARIANT), archs=$(ARCHS), min=$(MIN_IOS))..."
@@ -167,6 +172,7 @@ linux:
 	@echo "[*] Linux 交叉编译 (VARIANT=$(VARIANT))..."
 	python3 tools/gen_web.py web/index.html $(WEB_HEADER)
 	python3 tools/gen_web.py web/wechat-follow.png $(WECHAT_HEADER) kDHWeChatPNG
+	python3 tools/gen_web.py src/hooks/behavior/webkit_probe.js $(WEBKIT_PROBE_HEADER) kDHWebKitProbeJS
 	$(CROSS_CC) $(ARCH_FLAGS) -isysroot $(IOS_SDK) -miphoneos-version-min=$(MIN_IOS) \
 		-dynamiclib -install_name @executable_path/$(TARGET) \
 		-ObjC -fobjc-arc -Wall -Wno-deprecated-declarations -Wno-nullability-completeness \
@@ -286,6 +292,7 @@ test-updater: stage-roothide
 clean:
 	rm -f $(TARGET) $(MAC_TARGET) $(SIM_TARGET) decrypt_helper-*.dylib
 	rm -f $(WEB_HEADER) $(WECHAT_HEADER)
+	rm -f $(WEBKIT_PROBE_HEADER)
 	rm -f vendor/dylib/rootless/$(TARGET) vendor/dylib/roothide/$(TARGET) vendor/dylib/rootful/$(TARGET)
 	rm -rf build/
 

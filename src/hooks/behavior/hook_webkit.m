@@ -4,8 +4,8 @@
 //   - 这里只 swizzle 宿主进程能看到的 WebKit Objective-C API。
 //   - WKWebView 的页面内容和网络实际运行在 com.apple.WebKit.WebContent /
 //     com.apple.WebKit.Networking 进程，本文件不承诺看到这两个进程内部的对象。
-//   - 不主动注入 JS，不修改页面行为；只记录导航、evaluateJavaScript、
-//     WKScriptMessage、Cookie / WebsiteDataStore、自定义 scheme handler。
+//   - 管理器开启 WebKit JS 探针后，在 document-start 注入只读网络观测脚本；
+//     其它 ObjC API 仍只记录导航、evaluateJavaScript、Cookie / WebsiteDataStore 等行为。
 
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -19,8 +19,9 @@
 #import "dh_capture.h"
 #import "dh_health.h"
 #import "hook_webkit.h"
+#import "webkit_probe_js.h"
 
-#define DH_WK_MAX_BODY (32 * 1024)
+#define DH_WK_MAX_BODY (256 * 1024)
 
 static _Thread_local int g_dh_wk_log_depth = 0;
 
@@ -59,7 +60,8 @@ static NSData *dh_wk_data(id object) {
     return data;
 }
 
-static void dh_wk_log_algo(NSString *algorithm, NSString *operation, NSString *detail, id body) {
+static void dh_wk_log_event(NSString *algorithm, NSString *operation, NSString *detail,
+                            id body, NSDictionary *metadata, uint64_t timestampMs) {
     if (g_dh_wk_log_depth || !dh_capture_sub_enabled(DH_CAP_NETWORK)) return;
     g_dh_wk_log_depth++;
     @try {
@@ -69,12 +71,18 @@ static void dh_wk_log_algo(NSString *algorithm, NSString *operation, NSString *d
         entry.operation = operation ?: @"";
         entry.detail = detail ?: @"";
         entry.input = dh_wk_data(body);
+        entry.metadata = metadata;
         entry.timestamp = DHTimestampNow();
+        entry.timestampMs = timestampMs;
         entry.callStack = DHCallStackFiltered();
         [[DHLogStore shared] append:entry];
     } @finally {
         g_dh_wk_log_depth--;
     }
+}
+
+static void dh_wk_log_algo(NSString *algorithm, NSString *operation, NSString *detail, id body) {
+    dh_wk_log_event(algorithm, operation, detail, body, nil, 0);
 }
 
 static void dh_wk_log(NSString *operation, NSString *detail, id body) {
@@ -89,7 +97,6 @@ static void dh_wk_probe_ensure_lock(void) {
 static void dh_wk_probe_save_locked(void) {
     if (!g_dh_wk_probe_conf_path) return;
     NSDictionary *root = @{
-        @"enabled": atomic_load_explicit(&g_dh_wk_probe_enabled, memory_order_relaxed) != 0 ? @YES : @NO,
         @"redact":  atomic_load_explicit(&g_dh_wk_probe_redact, memory_order_relaxed) != 0 ? @YES : @NO,
         @"allow":   g_dh_wk_probe_allow ?: @[],
         @"deny":    g_dh_wk_probe_deny ?: @[],
@@ -105,16 +112,15 @@ static void dh_wk_probe_save_locked(void) {
 
 static void dh_wk_probe_apply_locked(NSDictionary *root) {
     if (![root isKindOfClass:[NSDictionary class]]) return;
-    if (root[@"enabled"]) atomic_store(&g_dh_wk_probe_enabled, [root[@"enabled"] boolValue] ? 1 : 0);
     if (root[@"redact"])  atomic_store(&g_dh_wk_probe_redact,  [root[@"redact"] boolValue] ? 1 : 0);
     if ([root[@"allow"] isKindOfClass:[NSArray class]]) g_dh_wk_probe_allow = [root[@"allow"] copy];
     if ([root[@"deny"]  isKindOfClass:[NSArray class]]) g_dh_wk_probe_deny  = [root[@"deny"] copy];
 }
 
-void dh_webkit_probe_load(NSString *confPath) {
+void dh_webkit_probe_load(NSString *confPath, BOOL enabledByManager) {
     dh_wk_probe_ensure_lock();
     [g_dh_wk_probe_lock lock];
-    atomic_store(&g_dh_wk_probe_enabled, 0);   // 默认关闭
+    atomic_store(&g_dh_wk_probe_enabled, enabledByManager ? 1 : 0);
     atomic_store(&g_dh_wk_probe_redact, 1);
     g_dh_wk_probe_allow = @[];
     g_dh_wk_probe_deny  = @[];
@@ -125,6 +131,7 @@ void dh_webkit_probe_load(NSString *confPath) {
         dh_in_hook = saved;
         if (data.length) {
             NSDictionary *root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            // 管理器开关是唯一的持久启动门控；旧配置中的 enabled 不再制造第二个开关。
             dh_wk_probe_apply_locked(root);
         }
     }
@@ -146,7 +153,7 @@ NSDictionary *dh_webkit_probe_snapshot(void) {
         @"redact":  atomic_load_explicit(&g_dh_wk_probe_redact, memory_order_relaxed) != 0 ? @YES : @NO,
         @"allow":   g_dh_wk_probe_allow ?: @[],
         @"deny":    g_dh_wk_probe_deny ?: @[],
-        @"note":    @"JS 网络探针仅对新创建的 WKWebView 生效；修改配置后需重新加载页面/重建 WebView。",
+        @"note":    @"管理器的 WebKit JS 探针开关是启动门控；域名/脱敏修改后需重新加载页面或重建 WKWebView。",
     };
     [g_dh_wk_probe_lock unlock];
     return out;
@@ -156,6 +163,7 @@ void dh_webkit_probe_set_config(NSDictionary *changes) {
     if (![changes isKindOfClass:[NSDictionary class]]) return;
     dh_wk_probe_ensure_lock();
     [g_dh_wk_probe_lock lock];
+    // enabled 只由管理器的全局功能开关决定；MCP 只调整过滤/脱敏细项。
     dh_wk_probe_apply_locked(changes);
     dh_wk_probe_save_locked();
     [g_dh_wk_probe_lock unlock];
@@ -240,21 +248,30 @@ static BOOL dh_wk_probe_is_sensitive_header(NSString *key) {
     return NO;
 }
 
+static id dh_wk_probe_sanitize_object(id object, BOOL insideHeaders) {
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        NSMutableDictionary *out = [NSMutableDictionary dictionary];
+        [(NSDictionary *)object enumerateKeysAndObjectsUsingBlock:^(id key, id value, __unused BOOL *stop) {
+            NSString *name = [key isKindOfClass:[NSString class]] ? key : [key description];
+            BOOL nextHeaders = insideHeaders || [[name lowercaseString] containsString:@"headers"];
+            if (insideHeaders && dh_wk_probe_is_sensitive_header(name)) out[name] = @"<redacted>";
+            else out[name] = dh_wk_probe_sanitize_object(value, nextHeaders) ?: [NSNull null];
+        }];
+        return out;
+    }
+    if ([object isKindOfClass:[NSArray class]]) {
+        NSMutableArray *out = [NSMutableArray arrayWithCapacity:[(NSArray *)object count]];
+        for (id value in (NSArray *)object)
+            [out addObject:dh_wk_probe_sanitize_object(value, insideHeaders) ?: [NSNull null]];
+        return out;
+    }
+    return object;
+}
+
 static NSDictionary *dh_wk_probe_sanitize(NSDictionary *payload) {
     if (!payload || atomic_load_explicit(&g_dh_wk_probe_redact, memory_order_relaxed) == 0)
         return payload;
-    NSMutableDictionary *out = [payload mutableCopy];
-    for (NSString *field in @[@"headers", @"responseHeaders"]) {
-        NSDictionary *headers = payload[field];
-        if (![headers isKindOfClass:[NSDictionary class]]) continue;
-        NSMutableDictionary *safe = [headers mutableCopy];
-        for (NSString *key in headers) {
-            if ([key isKindOfClass:[NSString class]] && dh_wk_probe_is_sensitive_header(key))
-                safe[key] = @"<redacted>";
-        }
-        out[field] = safe;
-    }
-    return out;
+    return dh_wk_probe_sanitize_object(payload, NO);
 }
 
 @interface DHWKProbeBridge : NSObject
@@ -281,10 +298,33 @@ static NSDictionary *dh_wk_probe_sanitize(NSDictionary *payload) {
     } @catch (__unused NSException *e) {}
     if (![name isEqualToString:kDHWKProbeName] || !body) return;
 
+    NSDictionary *params = [body[@"params"] isKindOfClass:[NSDictionary class]] ? body[@"params"] : @{};
+    NSDictionary *request = [params[@"request"] isKindOfClass:[NSDictionary class]] ? params[@"request"] : @{};
+    NSDictionary *response = [params[@"response"] isKindOfClass:[NSDictionary class]] ? params[@"response"] : @{};
     NSString *url = [body[@"url"] isKindOfClass:[NSString class]] ? body[@"url"] : nil;
+    if (!url.length && [request[@"url"] isKindOfClass:[NSString class]]) url = request[@"url"];
+    if (!url.length && [response[@"url"] isKindOfClass:[NSString class]]) url = response[@"url"];
     if (!dh_wk_probe_should_report(url)) return;
-    NSString *kind = [body[@"kind"] isKindOfClass:[NSString class]] ? body[@"kind"] : @"unknown";
-    dh_wk_log_algo(@"WEBKIT-PROBE", kind, kind, dh_wk_probe_sanitize(body));
+    NSString *method = [body[@"method"] isKindOfClass:[NSString class]] ? body[@"method"] : nil;
+    if (!method.length) method = [body[@"kind"] isKindOfClass:[NSString class]] ? body[@"kind"] : @"unknown";
+    NSString *requestId = [params[@"requestId"] description] ?: @"";
+    NSString *httpMethod = [request[@"method"] isKindOfClass:[NSString class]] ? request[@"method"] : nil;
+    NSNumber *status = [response[@"status"] isKindOfClass:[NSNumber class]] ? response[@"status"] : nil;
+    NSMutableString *detail = [NSMutableString string];
+    if (httpMethod.length) [detail appendString:httpMethod];
+    else [detail appendString:method];
+    if (url.length) [detail appendFormat:@" %@", url];
+    if (status) [detail appendFormat:@" status=%@", status];
+    NSMutableDictionary *metadata = [@{
+        @"source": @"js",
+        @"eventName": method,
+        @"requestId": requestId,
+        @"url": url ?: @"",
+        @"schema": [body[@"schema"] isKindOfClass:[NSString class]] ? body[@"schema"] : @"iosdecrypthub.cdp.v1",
+    } mutableCopy];
+    NSNumber *ts = [body[@"ts"] isKindOfClass:[NSNumber class]] ? body[@"ts"] : nil;
+    dh_wk_log_event(@"WEBKIT-CDP", method, detail, dh_wk_probe_sanitize(body), metadata,
+                    ts ? ts.unsignedLongLongValue : 0);
 }
 @end
 
@@ -305,25 +345,10 @@ static NSString *dh_wk_probe_js(void) {
     NSString *nameJSON = nameData ? [[NSString alloc] initWithData:nameData encoding:NSUTF8StringEncoding] : @"[\"probe\"]";
     if (nameJSON.length >= 2) nameJSON = [nameJSON substringWithRange:NSMakeRange(1, nameJSON.length - 2)];
 
-    static const char *body =
-        "function clip(v,n){try{if(v==null)return null;if(typeof v==='string')return v.length>n?v.slice(0,n)+'...':v;if(typeof v==='object')return JSON.stringify(v).slice(0,n);return String(v).slice(0,n);}catch(e){return null;}}\n"
-        "function hdrs(h){var o={};try{if(!h)return o;if(h.forEach)h.forEach(function(v,k){o[k]=String(v);});else for(var k in h)o[k]=String(h[k]);}catch(e){}return o;}\n"
-        "function shouldReport(u){try{var h=new URL(u,location.href).hostname.toLowerCase();var i;if(DENY.length)for(i=0;i<DENY.length;i++){var d=String(DENY[i]).toLowerCase();if(h===d||h.slice(-(d.length+1))==='.'+d)return false;}if(ALLOW.length){for(i=0;i<ALLOW.length;i++){var a=String(ALLOW[i]).toLowerCase();if(h===a||h.slice(-(a.length+1))==='.'+a)return true;}return false;}return true;}catch(e){return true;}}\n"
-        "function report(kind,data){try{data=Object.assign({kind:kind,ts:Date.now()},data||{});if(data.url)data.url=new URL(data.url,location.href).href;if(!shouldReport(data.url))return;window.webkit.messageHandlers[NAME].postMessage(data);}catch(e){}}\n"
-        "var MAX=8192;\n"
-        "var of=window.fetch;if(of)window.fetch=function(input,init){var url=(typeof input==='string')?input:(input&&input.url)||'';var method=(init&&init.method)||(input&&input.method)||'GET';var hs={};try{if(input&&input.headers)hs=hdrs(input.headers);if(init&&init.headers){var ih=hdrs(init.headers);for(var k in ih)hs[k]=ih[k];}}catch(e){}var body=(init&&init.body);if(body!=null&&typeof body!=='string')try{body=String(body);}catch(e){body=null;}report('fetch.request',{url:url,method:method,headers:hs,body:clip(body,MAX)});return of.apply(this,arguments).then(function(r){try{var rh=hdrs(r.headers);if(r.clone)r.clone().text().then(function(t){report('fetch.response',{url:r.url||url,status:r.status,headers:rh,body:clip(t,MAX)});});else report('fetch.response',{url:r.url||url,status:r.status,headers:rh});}catch(e){}return r;});};\n"
-        "var oo=XMLHttpRequest.prototype.open,os=XMLHttpRequest.prototype.send,oh=XMLHttpRequest.prototype.setRequestHeader;\n"
-        "XMLHttpRequest.prototype.open=function(m,u){this.__dh={method:m,url:u,headers:{}};return oo.apply(this,arguments);};\n"
-        "XMLHttpRequest.prototype.setRequestHeader=function(k,v){try{if(this.__dh)this.__dh.headers[k]=v;}catch(e){}return oh.apply(this,arguments);};\n"
-        "XMLHttpRequest.prototype.send=function(b){var x=this;try{var d=x.__dh||{};report('xhr.request',{url:d.url,method:d.method||'GET',headers:d.headers||{},body:clip(typeof b==='string'?b:null,MAX)});x.addEventListener('load',function(){try{var rt=(x.responseType===''||x.responseType==='text')?x.responseText:null;var hs={};var raw=x.getAllResponseHeaders()||'';raw.split(/\\r?\\n/).forEach(function(l){var i=l.indexOf(':');if(i>0)hs[l.slice(0,i).trim()]=l.slice(i+1).trim();});report('xhr.response',{url:d.url,status:x.status,headers:hs,body:clip(rt,MAX)});}catch(e){}});}catch(e){}return os.apply(this,arguments);};\n"
-        "var OW=window.WebSocket;if(OW){var DW=function(u,p){var w=p===undefined?new OW(u):new OW(u,p);try{report('websocket.open',{url:String(u)});w.addEventListener('message',function(e){try{report('websocket.recv',{url:String(u),data:clip(typeof e.data==='string'?e.data:'[binary]',MAX)});}catch(x){}});var s=w.send;w.send=function(d){try{report('websocket.send',{url:String(u),data:clip(typeof d==='string'?d:'[binary]',MAX)});}catch(x){}return s.apply(w,arguments);};}catch(e){}return w;};DW.prototype=OW.prototype;['CONNECTING','OPEN','CLOSING','CLOSED'].forEach(function(k){try{DW[k]=OW[k];}catch(e){}});window.WebSocket=DW;}\n"
-        "if(window.EventSource){var OE=window.EventSource;var DE=function(u,c){var e=c===undefined?new OE(u):new OE(u,c);try{report('eventsource.open',{url:String(u)});e.addEventListener('message',function(ev){report('eventsource.message',{url:String(u),data:clip(ev.data,MAX)});});e.addEventListener('error',function(){report('eventsource.error',{url:String(u)});});}catch(x){}return e;};DE.prototype=OE.prototype;window.EventSource=DE;}\n"
-        "function wrapStorageProto(){try{var p=window.Storage&&Storage.prototype;if(!p||p.__dh)return;p.__dh=true;var oi=p.setItem,or=p.removeItem,oc=p.clear;p.setItem=function(k,v){try{var n=this===window.localStorage?'localStorage':'sessionStorage';report(n+'.set',{url:location.href,key:String(k),value:clip(String(v),MAX)});}catch(e){}return oi.apply(this,arguments);};p.removeItem=function(k){try{var n=this===window.localStorage?'localStorage':'sessionStorage';report(n+'.remove',{url:location.href,key:String(k)});}catch(e){}return or.apply(this,arguments);};p.clear=function(){try{var n=this===window.localStorage?'localStorage':'sessionStorage';report(n+'.clear',{url:location.href});}catch(e){}return oc.apply(this,arguments);};}catch(e){}}\n"
-        "wrapStorageProto();\n"
-        "['log','info','warn','error'].forEach(function(level){var oc=console[level];if(oc)console[level]=function(){try{var a=[];for(var i=0;i<arguments.length;i++)a.push(clip(arguments[i],MAX));report('console',{url:location.href,level:level,args:a});}catch(e){}return oc.apply(console,arguments);};});\n"
-        "if(window.crypto&&crypto.subtle){var cs=crypto.subtle;['digest','encrypt','decrypt','sign','verify','deriveBits','importKey','exportKey'].forEach(function(m){var of=cs[m];if(!of)return;try{cs[m]=function(){var a=arguments;try{var al=a[0];var nm=(al&&(al.name||al))||'';report('crypto.'+m,{url:location.href,algorithm:String(nm),argc:a.length});}catch(e){}return of.apply(cs,a);};}catch(e){}});}\n"
-        "if(navigator.sendBeacon){var ob=navigator.sendBeacon;navigator.sendBeacon=function(u,d){try{report('beacon',{url:String(u),body:clip(typeof d==='string'?d:null,MAX)});}catch(e){}return ob.apply(navigator,arguments);};}\n";
-    return [NSString stringWithFormat:@"(function(){var ALLOW=%@;var DENY=%@;var NAME=%@;%s})();",
+    NSString *body = [[NSString alloc] initWithBytes:kDHWebKitProbeJS
+                                              length:kDHWebKitProbeJS_len
+                                            encoding:NSUTF8StringEncoding] ?: @"";
+    return [NSString stringWithFormat:@"(function(){var ALLOW=%@;var DENY=%@;var NAME=%@;%@})();",
             allowJSON, denyJSON, nameJSON, body];
 }
 
@@ -853,8 +878,9 @@ static void swz_wk_setSchemeHandler(id self, SEL _cmd, id handler, id scheme) {
 
 static void (*orig_wk_setInspectable)(id, SEL, BOOL) = NULL;
 static void swz_wk_setInspectable(id self, SEL _cmd, BOOL inspectable) {
-    dh_wk_log(@"inspectable", [NSString stringWithFormat:@"setInspectable=%d", inspectable], nil);
-    if (orig_wk_setInspectable) orig_wk_setInspectable(self, _cmd, inspectable);
+    BOOL effective = dh_webkit_probe_enabled() ? YES : inspectable;
+    dh_wk_log(@"inspectable", [NSString stringWithFormat:@"requested=%d effective=%d", inspectable, effective], nil);
+    if (orig_wk_setInspectable) orig_wk_setInspectable(self, _cmd, effective);
 }
 
 // WKWebView / WKHTTPCookieStore 的真实方法经常落在私有具体子类上。
@@ -903,6 +929,8 @@ static void dh_wk_install_data_store_methods(Class dataStore) {
 
 static id (*orig_wk_initWithFrameConfiguration)(id, SEL, CGRect, id) = NULL;
 static id swz_wk_initWithFrameConfiguration(id self, SEL _cmd, CGRect frame, id configuration) {
+    // WKWebView 初始化时会读取 configuration；document-start 脚本必须在调用原 init 前加入。
+    dh_wk_probe_install_configuration(configuration);
     id result = orig_wk_initWithFrameConfiguration
         ? orig_wk_initWithFrameConfiguration(self, _cmd, frame, configuration) : nil;
     if (result) {
@@ -915,7 +943,9 @@ static id swz_wk_initWithFrameConfiguration(id self, SEL _cmd, CGRect frame, id 
                 if (cookieStore) dh_wk_install_cookie_methods(object_getClass(cookieStore));
             }
         } @catch (__unused NSException *e) {}
-        dh_wk_probe_install_configuration(configuration);
+        if (dh_webkit_probe_enabled() && [result respondsToSelector:@selector(setInspectable:)]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(result, @selector(setInspectable:), YES);
+        }
     }
     return result;
 }

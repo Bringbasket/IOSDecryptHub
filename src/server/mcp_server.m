@@ -24,6 +24,7 @@
 #include "dh_files.h"
 #include "dump_manager.h"
 #include "hook_webkit.h"
+#include "dh_collector.h"
 #include <string.h>
 
 #define MCP_SERVER_NAME     "ios-decrypt-helper"
@@ -1323,6 +1324,7 @@ static NSDictionary *tool_get_stats(NSDictionary *args) {
         @"capture":    capture,
         @"logBytes":   @([s totalLogBytes]),
         @"pipeline":   [s pipelineStats],
+        @"collector":  dh_collector_status(),
         @"process":    [s processInfo] ?: @{},
         @"noise":      @{@"crypto": @([s noiseCountForBoard:DHNoiseBoardCrypto]),
                          @"sys":    @([s noiseCountForBoard:DHNoiseBoardSys])},
@@ -1975,6 +1977,7 @@ static NSDictionary *tool_get_diag(NSDictionary *args) {
         @"diag":     (txt && txt[0]) ? @(txt) : @"",
         @"unhooked": (unh && unh[0]) ? @(unh) : @"",
         @"pipeline": [[DHLogStore shared] pipelineStats],
+        @"collector": dh_collector_status(),
     });
 }
 
@@ -2462,16 +2465,15 @@ static NSArray *tool_definitions(void) {
         },
         @{
             @"name": @"get_webkit_probe",
-            @"description": @"Get the optional WKWebView JS network probe config. Default disabled. When enabled, newly created WKWebViews get a document-start script that reports fetch/XHR/WebSocket/sendBeacon to the host event feed as algorithm WEBKIT-PROBE.",
+            @"description": @"Get the WKWebView JS network probe state and filter config. The manager WebKit JS probe switch is the only enable gate. When enabled, newly created WKWebViews report fetch/XHR/WebSocket/sendBeacon as CDP-style WEBKIT-CDP events.",
             @"inputSchema": @{@"type": @"object", @"properties": @{}},
         },
         @{
             @"name": @"set_webkit_probe",
-            @"description": @"Configure the optional WKWebView JS network probe. Changes affect newly created WKWebViews; reload the page or recreate the WebView. Domain allow/deny entries match hostname or subdomains. redact=true replaces Cookie/Authorization/token-like header values.",
+            @"description": @"Configure WKWebView JS probe filtering and redaction. Enable/disable it in the IOSDecryptHub manager. Changes affect newly created or reloaded WKWebViews. Domain allow/deny entries match hostname or subdomains.",
             @"inputSchema": @{
                 @"type": @"object",
                 @"properties": @{
-                    @"enabled": @{@"type": @"boolean", @"description": @"Enable document-start JS probe"},
                     @"redact":  @{@"type": @"boolean", @"description": @"Redact sensitive header values (default true)"},
                     @"allow":   @{@"type": @"array", @"items": @{@"type": @"string"}, @"description": @"Optional allowlist of hostnames; empty means all"},
                     @"deny":    @{@"type": @"array", @"items": @{@"type": @"string"}, @"description": @"Optional denylist of hostnames"},
@@ -2618,13 +2620,14 @@ static NSDictionary *tool_get_capture_coverage(NSDictionary *args) {
 
 static NSDictionary *tool_get_webkit_probe(NSDictionary *args) {
     (void)args;
-    return tool_ok(dh_webkit_probe_snapshot());
+    NSMutableDictionary *snapshot = [dh_webkit_probe_snapshot() mutableCopy];
+    snapshot[@"collector"] = dh_collector_status();
+    return tool_ok(snapshot);
 }
 
 static NSDictionary *tool_set_webkit_probe(NSDictionary *args) {
     if (![args isKindOfClass:[NSDictionary class]]) return tool_err(@"missing arguments");
     NSMutableDictionary *changes = [NSMutableDictionary dictionary];
-    if (args[@"enabled"] != nil) changes[@"enabled"] = [args[@"enabled"] boolValue] ? @YES : @NO;
     if (args[@"redact"] != nil)  changes[@"redact"]  = [args[@"redact"] boolValue] ? @YES : @NO;
     for (NSString *field in @[@"allow", @"deny"]) {
         id value = args[field];
@@ -2635,9 +2638,11 @@ static NSDictionary *tool_set_webkit_probe(NSDictionary *args) {
                 [items addObject:item];
         changes[field] = items;
     }
-    if (!changes.count) return tool_err(@"missing one of: enabled, redact, allow, deny");
+    if (!changes.count) return tool_err(@"missing one of: redact, allow, deny (enable it in the manager)");
     dh_webkit_probe_set_config(changes);
-    return tool_ok(dh_webkit_probe_snapshot());
+    NSMutableDictionary *snapshot = [dh_webkit_probe_snapshot() mutableCopy];
+    snapshot[@"collector"] = dh_collector_status();
+    return tool_ok(snapshot);
 }
 
 static NSDictionary *dispatch_tool(NSString *name, NSDictionary *args) {

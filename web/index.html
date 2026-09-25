@@ -1319,11 +1319,13 @@
     else rawMeta = e.detail ? e.detail : ('in:'+(e.inLen||0)+'B · out:'+(e.outLen||0)+'B');
     const meta = escapeHTML(rawMeta);
     const lensExtra = (!isNet && !e.detail && e.outputHexPreview) ? ' <span style="color:#7fd6df">⇢'+escapeHTML(e.outputHexPreview)+'</span>' : '';
+    const source = e.source ? '<span class="op">['+escapeHTML(String(e.source).toUpperCase())+']</span>' : '';
     return '<div class="row cat-'+cls+sel+'" data-seq="'+e.seq+'">' +
       '<div class="top">' +
       '<span class="seq">#'+e.seq+'</span>' +
       '<span class="pill '+cls+'">'+cname+'</span>' +
       '<span class="algo">'+escapeHTML(e.algorithm)+'</span>' +
+      source +
       '<span class="op">'+escapeHTML(e.operation)+'</span>' +
       '<span class="ts">'+escapeHTML(e.timestamp)+'</span>' +
       '</div>' +
@@ -1373,8 +1375,11 @@
     let actions = '<div class="detail-actions">' +
       '<button data-copyall="'+d.seq+'">复制整条</button>' +
       '</div>';
+    const sourceText = d.source ? ' · 来源 '+String(d.source).toUpperCase() : '';
+    const eventText = d.eventName ? ' · '+d.eventName : '';
+    const requestText = d.requestId ? ' · requestId='+d.requestId : '';
     let h = '<div class="detail-head"><h2><span class="cat-dot '+dcls+'"></span>#'+d.seq+'  '+escapeHTML(d.algorithm)+'</h2>' +
-      '<div class="sub">'+escapeHTML(d.operation)+' · '+escapeHTML(d.timestamp)+(d.publicKeyInfo?' · '+escapeHTML(d.publicKeyInfo):'')+'</div>' +
+      '<div class="sub">'+escapeHTML(d.operation)+' · '+escapeHTML(d.timestamp)+escapeHTML(sourceText+eventText+requestText)+(d.publicKeyInfo?' · '+escapeHTML(d.publicKeyInfo):'')+'</div>' +
       actions + '</div>';
     if (isHttp) {
       const reqText = netRequestText(d);

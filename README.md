@@ -12,6 +12,7 @@ IOSDecryptHub 是一个注入到 iOS App 进程中的运行时分析 dylib，可
 
 - 拦截系统加密 API，记录**算法 / Key / IV / 明文 / 密文 / 调用栈**（摘要、HMAC、对称、非对称、KDF、OpenSSL EVP）
 - 文件、网络、Keychain、动态加载等行为观测
+- WebKit 三层网络采集：JS fetch/XHR 探针、Networking 进程低层 Hook、Remote Inspector/CDP 汇总（见 [`docs/webkit_full_capture.md`](docs/webkit_full_capture.md)）
 - 浏览器 Web 面板（实时事件流 + 详情），设备端悬浮窗显示统计与面板地址
 - FairPlay 内存脱壳
 - 内置 MCP 服务器（Streamable HTTP，复用 8088 端口），配合 [`idh`](https://github.com/decrypthub/idh-cli) 网关可直接给 AI 客户端调用
