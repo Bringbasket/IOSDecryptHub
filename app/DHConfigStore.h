@@ -17,6 +17,12 @@ NSSet<NSString *> *DHReadEnabledBundles(void);
 /// rootHide 写不动 jb 时丢 set-enabled 请求，由 updated.sh 拷贝。不在 UI 线程等 launchd。
 BOOL DHWriteEnabledBundles(NSSet<NSString *> *bundleIDs, NSError *_Nullable *_Nullable error);
 
+/// 管理器全局功能开关（总开关、WebKit 系统进程注入、各捕获类别）。
+/// 旧配置缺字段时自动补兼容默认值。
+NSDictionary<NSString *, NSNumber *> *DHReadFeatureFlags(void);
+/// 修改一个功能开关并同步到 loader/jb 配置；未知 key 返回 NO。
+BOOL DHWriteFeatureFlag(NSString *key, BOOL enabled, NSError *_Nullable *_Nullable error);
+
 /// 引擎元信息 {version, variant, arch}，缺失返回空字典
 NSDictionary *DHReadEngineMeta(void);
 /// daemon 写的更新状态，缺失返回空字典

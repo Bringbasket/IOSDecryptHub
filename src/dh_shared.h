@@ -24,6 +24,23 @@
 
 #define DH_DOMAIN_LOADER  @"com.iosdecrypthub.loader"
 #define DH_KEY_BUNDLES    @"enabledBundles"
+#define DH_KEY_FEATURES   @"featureFlags"
+
+// 管理器 App 的全局功能开关。缺失时按兼容默认值处理：除高风险的 WebKit
+// 系统进程注入和 JS 探针外，其余捕获能力保持开启，与旧版本行为一致。
+#define DH_FEATURE_MASTER          @"master"
+#define DH_FEATURE_WEBKIT_PROCESS  @"webkitProcess"
+#define DH_FEATURE_NETWORK         @"network"
+#define DH_FEATURE_WEBKIT_JS       @"webkitJSProbe"
+#define DH_FEATURE_DIGEST          @"digest"
+#define DH_FEATURE_HMAC            @"hmac"
+#define DH_FEATURE_SYMMETRIC       @"symmetric"
+#define DH_FEATURE_EVP             @"evp"
+#define DH_FEATURE_ASYMMETRIC      @"asymmetric"
+#define DH_FEATURE_KDF             @"kdf"
+#define DH_FEATURE_KEYCHAIN        @"keychain"
+#define DH_FEATURE_FILE            @"file"
+#define DH_FEATURE_ENVIRONMENT     @"environment"
 
 // 相对 bootstrap 根目录。旧值少了 usr/lib/，App 会写到 <jbroot>/IOSDecryptHub/...，
 // 开关表现为「写入启用名单失败」。

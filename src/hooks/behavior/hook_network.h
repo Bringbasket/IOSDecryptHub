@@ -13,6 +13,10 @@ extern "C" {
 
 void dh_net_mark_internal_fd(int fd);
 
+// WebKit Networking 等系统网络进程使用同一主引擎，但只安装低层网络入口，
+// 避免在系统 XPC 进程里实例化 NSURLSession/WKWebView 或启动其它分析模块。
+void dh_install_network_process_hooks(void);
+
 #ifdef __cplusplus
 }
 #endif

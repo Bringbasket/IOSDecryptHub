@@ -65,7 +65,7 @@ CC=$(xcrun --find clang)
 LOADER_SRC="$SCRIPT_DIR/src/loader.m"
 APP_ICON="$SCRIPT_DIR/app/Icon.png"
 APP_WECHAT="$SCRIPT_DIR/app/wechat-follow.png"
-APP_SRCS="$SCRIPT_DIR/app/DHManagerAppDelegate.m $SCRIPT_DIR/app/DHRootViewController.m $SCRIPT_DIR/app/DHSettingsViewController.m $SCRIPT_DIR/app/DHVersionsViewController.m $SCRIPT_DIR/app/DHConfigStore.m $SCRIPT_DIR/app/DHAppEnumerator.m"
+APP_SRCS="$SCRIPT_DIR/app/DHManagerAppDelegate.m $SCRIPT_DIR/app/DHRootViewController.m $SCRIPT_DIR/app/DHSettingsViewController.m $SCRIPT_DIR/app/DHFeatureSettingsViewController.m $SCRIPT_DIR/app/DHVersionsViewController.m $SCRIPT_DIR/app/DHConfigStore.m $SCRIPT_DIR/app/DHAppEnumerator.m"
 APP_INFO="$SCRIPT_DIR/app/Info.plist"
 APP_ENTITLEMENTS="$SCRIPT_DIR/app/entitlements.plist"
 DAEMON_SRC="$SCRIPT_DIR/daemon/main.m"
@@ -495,6 +495,14 @@ POSTRM
     grep -q '<string>com.apple.UIKit</string>' \
         "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.plist" \
         || error "$VARIANT 的 MobileLoader 过滤器未覆盖 UIKit App"
+
+    grep -q '<string>com.apple.WebKit.Networking</string>' \
+        "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.plist" \
+        || error "$VARIANT 的 MobileLoader 过滤器未覆盖 WebKit Networking"
+
+    grep -q '<string>Any</string>' \
+        "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.plist" \
+        || error "$VARIANT 的 MobileLoader 过滤器缺少 Any 模式"
 
     grep -q '<string>com.iosdecrypthub.updated</string>' \
         "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist" \

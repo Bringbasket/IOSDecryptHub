@@ -938,7 +938,11 @@ static void dh_do_set_enabled(id raw) {
     NSString *path = [dir stringByAppendingPathComponent:@"enabledBundles.plist"];
     mkdir(dir.fileSystemRepresentation, 0777);
     NSError *serErr = nil;
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:@{DH_KEY_BUNDLES: bundles}
+    // 保留管理器写入的 featureFlags；set-enabled 只负责替换名单，不能把功能开关抹掉。
+    NSMutableDictionary *domain = [dh_read_plist(path) mutableCopy];
+    if (!domain) domain = [NSMutableDictionary dictionary];
+    domain[DH_KEY_BUNDLES] = bundles;
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:domain
         format:NSPropertyListXMLFormat_v1_0 options:0 error:&serErr];
     BOOL ok = NO;
     if (data) {

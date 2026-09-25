@@ -4,9 +4,16 @@
 <dict>
     <key>Filter</key>
     <dict>
+        <!-- MobileSubstrate 默认会把 Bundles/Executables 当 AND；Any 才是两条入口任选其一。 -->
+        <key>Mode</key>
+        <string>Any</string>
         <key>Bundles</key>
         <array>
             <string>com.apple.UIKit</string>
+        </array>
+        <key>Executables</key>
+        <array>
+            <string>com.apple.WebKit.Networking</string>
         </array>
     </dict>
 </dict>

@@ -4,5 +4,21 @@
 <dict>
     <key>enabledBundles</key>
     <array/>
+    <key>featureFlags</key>
+    <dict>
+        <key>master</key><true/>
+        <key>webkitProcess</key><false/>
+        <key>network</key><true/>
+        <key>webkitJSProbe</key><false/>
+        <key>digest</key><true/>
+        <key>hmac</key><true/>
+        <key>symmetric</key><true/>
+        <key>evp</key><true/>
+        <key>asymmetric</key><true/>
+        <key>kdf</key><true/>
+        <key>keychain</key><true/>
+        <key>file</key><true/>
+        <key>environment</key><true/>
+    </dict>
 </dict>
 </plist>

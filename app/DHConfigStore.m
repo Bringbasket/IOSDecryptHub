@@ -66,6 +66,36 @@ static NSString *dh_loader_prefs_path(void) {
         @"Library/Preferences/com.iosdecrypthub.loader.plist"];
 }
 
+static NSDictionary<NSString *, NSNumber *> *dh_feature_defaults(void) {
+    return @{
+        DH_FEATURE_MASTER: @YES,
+        DH_FEATURE_WEBKIT_PROCESS: @NO,
+        DH_FEATURE_NETWORK: @YES,
+        DH_FEATURE_WEBKIT_JS: @NO,
+        DH_FEATURE_DIGEST: @YES,
+        DH_FEATURE_HMAC: @YES,
+        DH_FEATURE_SYMMETRIC: @YES,
+        DH_FEATURE_EVP: @YES,
+        DH_FEATURE_ASYMMETRIC: @YES,
+        DH_FEATURE_KDF: @YES,
+        DH_FEATURE_KEYCHAIN: @YES,
+        DH_FEATURE_FILE: @YES,
+        DH_FEATURE_ENVIRONMENT: @YES,
+    };
+}
+
+static NSDictionary<NSString *, NSNumber *> *dh_merge_feature_flags(id raw) {
+    NSMutableDictionary<NSString *, NSNumber *> *merged = [dh_feature_defaults() mutableCopy];
+    if ([raw isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *source = raw;
+        for (NSString *key in dh_feature_defaults()) {
+            id value = source[key];
+            if ([value isKindOfClass:[NSNumber class]]) merged[key] = @([value boolValue]);
+        }
+    }
+    return merged;
+}
+
 static NSSet<NSString *> *_Nullable dh_bundles_from_dict(NSDictionary *domain) {
     id value = domain[DH_KEY_BUNDLES];
     if ([value isKindOfClass:[NSArray class]]) return [NSSet setWithArray:value];
@@ -121,6 +151,74 @@ static BOOL dh_try_write_jb_config(NSData *data) {
         NSFileProtectionKey: NSFileProtectionNone,
     } ofItemAtPath:path error:nil];
     return YES;
+}
+
+NSDictionary<NSString *, NSNumber *> *DHReadFeatureFlags(void) {
+    @try {
+        NSArray<NSString *> *paths = @[
+            dh_loader_prefs_path(),
+            DH_LOADER_PREFS,
+            dh_config_path() ?: @"",
+        ];
+        for (NSString *path in paths) {
+            if (path.length == 0) continue;
+            NSDictionary *domain = [NSDictionary dictionaryWithContentsOfFile:path];
+            if ([domain[DH_KEY_FEATURES] isKindOfClass:[NSDictionary class]])
+                return dh_merge_feature_flags(domain[DH_KEY_FEATURES]);
+        }
+        CFPreferencesAppSynchronize((__bridge CFStringRef)DH_DOMAIN_LOADER);
+        CFPropertyListRef raw = CFPreferencesCopyAppValue(
+            (__bridge CFStringRef)DH_KEY_FEATURES,
+            (__bridge CFStringRef)DH_DOMAIN_LOADER);
+        id value = CFBridgingRelease(raw);
+        if ([value isKindOfClass:[NSDictionary class]]) return dh_merge_feature_flags(value);
+    } @catch (__unused NSException *e) {
+    }
+    return dh_feature_defaults();
+}
+
+BOOL DHWriteFeatureFlag(NSString *key, BOOL enabled, NSError **outError) {
+    if (![dh_feature_defaults().allKeys containsObject:key]) {
+        if (outError) *outError = [NSError errorWithDomain:@"DHManager" code:-20 userInfo:
+            @{NSLocalizedDescriptionKey: @"未知功能开关"}];
+        return NO;
+    }
+    NSString *loaderPath = dh_loader_prefs_path();
+    NSMutableDictionary *plist =
+        [[NSDictionary dictionaryWithContentsOfFile:loaderPath] mutableCopy]
+            ?: [NSMutableDictionary dictionary];
+    NSMutableDictionary *features = [DHReadFeatureFlags() mutableCopy];
+    features[key] = @(enabled);
+    plist[DH_KEY_FEATURES] = features;
+    if (![plist[DH_KEY_BUNDLES] isKindOfClass:[NSArray class]]) {
+        plist[DH_KEY_BUNDLES] = [[DHReadEnabledBundles() allObjects]
+            sortedArrayUsingSelector:@selector(compare:)];
+    }
+    @try {
+        NSError *error = nil;
+        NSData *data = [NSPropertyListSerialization dataWithPropertyList:plist
+            format:NSPropertyListXMLFormat_v1_0 options:0 error:&error];
+        if (!data || ![data writeToFile:loaderPath options:NSDataWritingAtomic error:&error]) {
+            if (outError) *outError = error;
+            return NO;
+        }
+        [[NSFileManager defaultManager] setAttributes:@{
+            NSFilePosixPermissions: @0644,
+            NSFileProtectionKey: NSFileProtectionNone,
+        } ofItemAtPath:loaderPath error:nil];
+        CFPreferencesSetValue((__bridge CFStringRef)DH_KEY_FEATURES,
+            (__bridge CFPropertyListRef)features,
+            (__bridge CFStringRef)DH_DOMAIN_LOADER,
+            kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        CFPreferencesSynchronize((__bridge CFStringRef)DH_DOMAIN_LOADER,
+            kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        (void)dh_try_write_jb_config(data); // roothide 写失败时由 updated.sh 的 WatchPaths 同步
+        return YES;
+    } @catch (NSException *e) {
+        if (outError) *outError = [NSError errorWithDomain:@"DHManager" code:-21 userInfo:
+            @{NSLocalizedDescriptionKey: e.reason ?: @"写入异常"}];
+        return NO;
+    }
 }
 
 // 更新请求多路投递。roothide 下 App 的绝对 /var/mobile 会被容器重定向，
@@ -270,7 +368,12 @@ NSDictionary<NSString *, NSDictionary *> *DHProbeInjectedApps(void) {
                 NSString *bid = nil;
                 if ([json isKindOfClass:[NSDictionary class]]) {
                     id proc = json[@"process"];
-                    if ([proc isKindOfClass:[NSDictionary class]]) bid = proc[@"bundleId"];
+                    if ([proc isKindOfClass:[NSDictionary class]]) {
+                        bid = proc[@"bundleId"];
+                        if (![bid isKindOfClass:[NSString class]] || bid.length == 0) {
+                            bid = proc[@"processName"];
+                        }
+                    }
                 }
                 if ([bid isKindOfClass:[NSString class]] && bid.length) {
                     NSDictionary *info = @{

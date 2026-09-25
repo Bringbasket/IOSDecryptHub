@@ -8,6 +8,8 @@
 
 static atomic_int g_sub[DH_CAP_SUB_COUNT];        // 1=捕获, 0=关闭
 static atomic_int g_cat_paused[DH_CAP_CAT_COUNT]; // 1=暂停
+static atomic_int g_global_master;
+static atomic_int g_global_sub[DH_CAP_SUB_COUNT];
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static char g_conf_path[1024] = {0};
@@ -26,6 +28,8 @@ static const char *kSubNames[DH_CAP_SUB_COUNT] = {
 static void set_defaults(void) {
     for (int i = 0; i < DH_CAP_SUB_COUNT; i++) atomic_store(&g_sub[i], 1);
     for (int i = 0; i < DH_CAP_CAT_COUNT; i++) atomic_store(&g_cat_paused[i], 0);
+    atomic_store(&g_global_master, 1);
+    for (int i = 0; i < DH_CAP_SUB_COUNT; i++) atomic_store(&g_global_sub[i], 1);
 }
 
 // v2 格式(按名/索引, 每行一项): 首行 "v2", 后跟 "sub <NAME> <0/1>" 与 "cat <index> <0/1>"。
@@ -85,7 +89,8 @@ void dh_capture_load(const char *confPath) {
 
 int dh_capture_sub_enabled(dh_cap_sub sub) {
     if (sub < 0 || sub >= DH_CAP_SUB_COUNT) return 1;
-    return atomic_load(&g_sub[sub]);
+    return atomic_load(&g_global_master) && atomic_load(&g_global_sub[sub]) &&
+           atomic_load(&g_sub[sub]);
 }
 
 void dh_capture_set_sub(dh_cap_sub sub, int on) {
@@ -97,6 +102,15 @@ void dh_capture_set_sub(dh_cap_sub sub, int on) {
 const char *dh_capture_sub_name(dh_cap_sub sub) {
     if (sub < 0 || sub >= DH_CAP_SUB_COUNT) return "";
     return kSubNames[sub];
+}
+
+void dh_capture_set_global_master(int on) {
+    atomic_store(&g_global_master, on ? 1 : 0);
+}
+
+void dh_capture_set_global_sub(dh_cap_sub sub, int on) {
+    if (sub < 0 || sub >= DH_CAP_SUB_COUNT) return;
+    atomic_store(&g_global_sub[sub], on ? 1 : 0);
 }
 
 int dh_capture_cat_paused(int cat) {

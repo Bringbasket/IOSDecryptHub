@@ -44,6 +44,11 @@ int  dh_capture_sub_enabled(dh_cap_sub sub);
 void dh_capture_set_sub(dh_cap_sub sub, int on);   // 设置并立即存盘
 const char *dh_capture_sub_name(dh_cap_sub sub);   // 给 /api/capture 的开关名(越界返回 "")
 
+// 管理器 App 下发的全局门控，不改写目标 App 自己的 .dh_capture.conf。
+// 最终有效值 = global master && global sub && 本地 sub。
+void dh_capture_set_global_master(int on);
+void dh_capture_set_global_sub(dh_cap_sub sub, int on);
+
 // 每类暂停(cat = DHCategory 值, 0..7)。
 int  dh_capture_cat_paused(int cat);
 void dh_capture_set_cat_paused(int cat, int paused);  // 设置并立即存盘

@@ -8,9 +8,11 @@
 #import "DHConfigStore.h"
 #import "dh_shared.h"
 #import "DHVersionsViewController.h"
+#import "DHFeatureSettingsViewController.h"
 
 typedef NS_ENUM(NSInteger, DHSection) {
-    DHSectionUpdate = 0,
+    DHSectionFeatures = 0,
+    DHSectionUpdate,
     DHSectionAbout,
     DHSectionCount,
 };
@@ -93,6 +95,7 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 
 - (NSInteger)tableView:(__unused UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
+        case DHSectionFeatures: return 1;
         case DHSectionUpdate: return self.hasUpdateRow ? 3 : 2;   // 检查更新 /[安装新版本]/ 历史版本
         case DHSectionAbout:  return 3 + (NSInteger)dh_social_rows().count;   // 公众号 + 社群 + App/引擎版本
         default: return 0;
@@ -101,6 +104,7 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 
 - (NSString *)tableView:(__unused UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
+        case DHSectionFeatures: return @"运行时引擎";
         case DHSectionUpdate: return @"引擎更新";
         case DHSectionAbout:  return @"关于";
         default: return nil;
@@ -144,6 +148,15 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == DHSectionFeatures) {
+        UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+        cell.textLabel.text = @"功能开关";
+        NSDictionary *flags = DHReadFeatureFlags();
+        cell.detailTextLabel.text = [flags[DH_FEATURE_MASTER] boolValue] ? @"已开启" : @"已关闭";
+        cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        return cell;
+    }
     if (indexPath.section == DHSectionUpdate) {
         if (indexPath.row == 0) return [self actionCell:@"检查引擎更新" image:nil enabled:!self.working];
         if (self.hasUpdateRow && indexPath.row == 1) {
@@ -230,6 +243,12 @@ static void dh_settings_state_changed(__unused CFNotificationCenterRef center,
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (self.working) return;
+    if (indexPath.section == DHSectionFeatures) {
+        DHFeatureSettingsViewController *features =
+            [[DHFeatureSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        [self.navigationController pushViewController:features animated:YES];
+        return;
+    }
     if (indexPath.section == DHSectionAbout) {
         NSArray<NSArray<NSString *> *> *social = dh_social_rows();
         if (indexPath.row >= 1 && indexPath.row <= (NSInteger)social.count) {

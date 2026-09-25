@@ -1,6 +1,7 @@
 // loader.m — IOSDecryptHub 越狱注入加载器
 //
-// 由 ElleKit 或 rootful Substitute 加载到 UIKit App（Filter: com.apple.UIKit）。
+// 由 ElleKit 或 rootful Substitute 加载到 UIKit App，以及可选的
+// com.apple.WebKit.Networking（Filter 使用 Mode=Any）。
 // 唯一职责：读取偏好设置 → 判断当前 App 是否启用 → dlopen 主 dylib。
 // 不包含任何 hook 逻辑。hook 全部由主 dylib 的 constructor 完成。
 //
@@ -10,10 +11,9 @@
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
 #import <syslog.h>
+#import "dh_shared.h"
 
 #define LOADER_TAG      "[IOSDecryptHub]"
-#define PREFS_DOMAIN    @"com.iosdecrypthub.loader"
-#define PREFS_KEY       @"enabledBundles"
 #define PREFS_PATH      @"/var/mobile/Library/Preferences/com.iosdecrypthub.loader.plist"
 #define ENGINE_REL      @"usr/lib/IOSDecryptHub/decrypt_helper.dylib"
 #define CONFIG_REL      @"usr/lib/IOSDecryptHub/config/enabledBundles.plist"
@@ -66,35 +66,36 @@ static NSArray<NSString *> *dh_config_candidates(void) {
 // 开关语义保持处处一致：列在名单里的 App 就会被注入，没有例外。
 // 相关：管理器 App 与设置面板同样出现在列表里，可以被显式打开（例如当服务宿主用）。
 
-// 读取偏好：判断当前 bundleID 是否在启用列表中
-static BOOL dh_should_inject(NSString *bundleID) {
-    if (!bundleID || bundleID.length == 0) return NO;
-
-    // 跳过系统关键进程（避免不必要的开销）
-    if ([bundleID hasPrefix:@"com.apple."]) return NO;
-
-
-    NSArray *enabled = nil;
+static NSDictionary *dh_read_loader_domain(const char **sourceOut) {
+    NSDictionary *domain = nil;
     const char *source = "none";
     @try {
-        // prefs 读到数组（含空数组=全关）就用。沙盒目标通常读不到这份文件，
-        // 再回退 jb 配置；禁止在宿主进程里 Synchronize 此外域。
-        NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
-        enabled = prefs[PREFS_KEY];
-        if ([enabled isKindOfClass:[NSArray class]]) {
+        // prefs 读到完整字典就用。沙盒目标通常读不到这份文件，再回退 jb 配置；
+        // 禁止在宿主进程里 Synchronize 此外域，以免阻塞目标 App 的启动路径。
+        domain = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
+        if ([domain isKindOfClass:[NSDictionary class]]) {
             source = "prefs";
         } else {
-            CFPropertyListRef value = CFPreferencesCopyAppValue(
-                (__bridge CFStringRef)PREFS_KEY,
-                (__bridge CFStringRef)PREFS_DOMAIN);
-            enabled = CFBridgingRelease(value);
-            if ([enabled isKindOfClass:[NSArray class]]) {
+            CFPropertyListRef bundlesRef = CFPreferencesCopyAppValue(
+                (__bridge CFStringRef)DH_KEY_BUNDLES,
+                (__bridge CFStringRef)DH_DOMAIN_LOADER);
+            CFPropertyListRef featuresRef = CFPreferencesCopyAppValue(
+                (__bridge CFStringRef)DH_KEY_FEATURES,
+                (__bridge CFStringRef)DH_DOMAIN_LOADER);
+            id bundles = CFBridgingRelease(bundlesRef);
+            id features = CFBridgingRelease(featuresRef);
+            if ([bundles isKindOfClass:[NSArray class]] ||
+                [features isKindOfClass:[NSDictionary class]]) {
+                NSMutableDictionary *prefs = [NSMutableDictionary dictionary];
+                if ([bundles isKindOfClass:[NSArray class]]) prefs[DH_KEY_BUNDLES] = bundles;
+                if ([features isKindOfClass:[NSDictionary class]]) prefs[DH_KEY_FEATURES] = features;
+                domain = prefs;
                 source = "cfprefs";
             } else {
                 for (NSString *configPath in dh_config_candidates()) {
-                    prefs = [NSDictionary dictionaryWithContentsOfFile:configPath];
-                    enabled = prefs[PREFS_KEY];
-                    if ([enabled isKindOfClass:[NSArray class]]) {
+                    NSDictionary *candidate = [NSDictionary dictionaryWithContentsOfFile:configPath];
+                    if ([candidate isKindOfClass:[NSDictionary class]]) {
+                        domain = candidate;
                         source = "jb";
                         break;
                     }
@@ -102,9 +103,42 @@ static BOOL dh_should_inject(NSString *bundleID) {
             }
         }
     } @catch (__unused NSException *exception) {
-        return NO;
+        domain = nil;
     }
-    if (!enabled || ![enabled isKindOfClass:[NSArray class]]) return NO;
+    if (sourceOut) *sourceOut = source;
+    return domain;
+}
+
+static BOOL dh_feature_enabled(NSDictionary *domain, NSString *key, BOOL defaultValue) {
+    id features = domain[DH_KEY_FEATURES];
+    id value = [features isKindOfClass:[NSDictionary class]] ? features[key] : nil;
+    return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : defaultValue;
+}
+
+static BOOL dh_is_webkit_networking(NSString *bundleID, NSString *processName) {
+    return [processName isEqualToString:@"com.apple.WebKit.Networking"] ||
+           [bundleID isEqualToString:@"com.apple.WebKit.Networking"];
+}
+
+// 读取偏好：普通 App 按启用名单；WebKit Networking 由独立全局开关控制。
+static BOOL dh_should_inject(NSString *bundleID, NSString *processName) {
+    const char *source = "none";
+    NSDictionary *domain = dh_read_loader_domain(&source);
+    if (![domain isKindOfClass:[NSDictionary class]]) return NO;
+    if (!dh_feature_enabled(domain, DH_FEATURE_MASTER, YES)) return NO;
+
+    if (dh_is_webkit_networking(bundleID, processName)) {
+        BOOL enabled = dh_feature_enabled(domain, DH_FEATURE_WEBKIT_PROCESS, NO);
+        if (enabled) {
+            syslog(LOG_NOTICE, LOADER_TAG " 将主引擎注入 WebKit Networking source=%s", source);
+        }
+        return enabled;
+    }
+
+    if (bundleID.length == 0 || [bundleID hasPrefix:@"com.apple."]) return NO;
+    id raw = domain[DH_KEY_BUNDLES];
+    if (![raw isKindOfClass:[NSArray class]]) return NO;
+    NSArray *enabled = raw;
     BOOL hit = [enabled containsObject:bundleID];
     if (hit) {
         syslog(LOG_NOTICE, LOADER_TAG " 将注入 %s source=%s",
@@ -117,9 +151,10 @@ __attribute__((constructor))
 static void dh_loader_init(void) {
     @autoreleasepool {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        NSString *processName = [NSProcessInfo processInfo].processName;
 
         // 默认不注入任何 App —— 只有用户在设置中明确开启的才注入
-        if (!dh_should_inject(bundleID)) {
+        if (!dh_should_inject(bundleID, processName)) {
             return;
         }
 
@@ -127,11 +162,13 @@ static void dh_loader_init(void) {
         // 注入框架授权的镜像。逐个 dlopen 才能得到真实结果。
         for (NSString *dylibPath in dh_dylib_candidates()) {
             syslog(LOG_INFO, LOADER_TAG " 注入 %s → %s",
-                   bundleID.UTF8String, dylibPath.UTF8String);
+                   (bundleID.length ? bundleID : processName).UTF8String,
+                   dylibPath.UTF8String);
             void *handle = dlopen(dylibPath.fileSystemRepresentation, RTLD_NOW);
             if (handle) return;
         }
         syslog(LOG_ERR, LOADER_TAG " 主 dylib 加载失败 (%s): %s",
-               bundleID.UTF8String, dlerror() ?: "unknown error");
+               (bundleID.length ? bundleID : processName).UTF8String,
+               dlerror() ?: "unknown error");
     }
 }
