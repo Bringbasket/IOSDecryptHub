@@ -67,12 +67,13 @@ Add the repo in Sileo / Zebra:
 https://ios.decrypthub.com
 ```
 
-Install the package matching your environment (the two packages target different architectures and must not be mixed):
+Install the package matching your jailbreak environment (the three packages target different environments and must not be mixed):
 
 - rootless (Dopamine, palera1n): the `com.iosdecrypthub` rootless package
 - roothide: the `com.iosdecrypthub` roothide package
+- rootful (traditional jailbreak, Substitute/MobileSubstrate): the `com.iosdecrypthub` rootful package
 
-An **IOSDecryptHub** icon then appears on the home screen: toggle target apps, check for updates and pick a version there. Force-quit a target app before opening it. No app is injected by default. Depends on ellekit.
+An **IOSDecryptHub** icon then appears on the home screen: toggle target apps, check for updates and pick a version there. Force-quit a target app before opening it. No app is injected by default. Rootless/roothide depend on ElleKit; rootful depends on Substitute/MobileSubstrate.
 
 <p align="center">
   <img src="./docs/screenshots/webui.png" alt="IOSDecryptHub web panel: crypto event list with UTF-8 / HEX / HEXDUMP detail" width="920">
@@ -100,6 +101,7 @@ One source tree produces four variants. They differ only in the compile-time `-D
 | `trollstore` | `make VARIANT=trollstore` | arm64 | TrollStore injector — **the dylib asset in our Releases** |
 | `rootless` | `make VARIANT=rootless` | arm64 | **engine inside the rootless deb** |
 | `roothide` | `make VARIANT=roothide` | arm64 + arm64e | **engine inside the roothide deb** (fat slice) |
+| `rootful` | `make VARIANT=rootful` | arm64 | **engine inside the rootful deb** (Substitute/MobileSubstrate) |
 
 ### Other build targets
 
@@ -113,12 +115,13 @@ make linux             # Linux/WSL cross-compile (set IOS_SDK and CROSS_CC)
 ## Building the jailbreak debs from source
 
 ```bash
-make deb              # build both rootless and roothide
+make deb              # build rootless, roothide and rootful packages
 make deb-rootless     # rootless only (arm64)
 make deb-roothide     # roothide only (arm64 + arm64e)
+make deb-rootful      # traditional rootful only (arm64, Substitute/MobileSubstrate)
 ```
 
-Products land in `build/deb/`. Install the package matching your environment; on roothide a plain rootless package fails to load because of the `arm64` / `arm64e` mismatch.
+Products land in `build/deb/`. Install the package matching your environment; a rootful device needs the Substitute package, while a roothide device needs the arm64/arm64e package.
 
 `make deb` compiles the engine first and stages it into `vendor/dylib/<variant>/`, then calls `build_deb.sh` to package. Requires macOS + Xcode (`xcrun`) + `dpkg-deb` + `ldid`.
 

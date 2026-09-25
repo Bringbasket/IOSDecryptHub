@@ -22,6 +22,7 @@ typedef enum {
     DH_VARIANT_TROLLSTORE,   // 巨魔 (TrollStore) 持久化安装
     DH_VARIANT_ROOTLESS,     // 越狱 rootless (ElleKit 加载器注入, arm64)
     DH_VARIANT_ROOTHIDE,     // 越狱 roothide (ElleKit 加载器注入, 胖切片 arm64+arm64e)
+    DH_VARIANT_ROOTFUL,      // 越狱 rootful (Substitute / MobileSubstrate, arm64)
     DH_VARIANT_COUNT
 } dh_variant;
 

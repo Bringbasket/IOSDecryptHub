@@ -20,6 +20,7 @@ const char *dh_variant_id(dh_variant v) {
         case DH_VARIANT_TROLLSTORE: return "trollstore";
         case DH_VARIANT_ROOTLESS:   return "rootless";
         case DH_VARIANT_ROOTHIDE:   return "roothide";
+        case DH_VARIANT_ROOTFUL:    return "rootful";
         default:                    return "dev";
     }
 }
@@ -30,6 +31,7 @@ const char *dh_variant_label(dh_variant v) {
         case DH_VARIANT_TROLLSTORE: return "巨魔 (TrollStore) 持久化";
         case DH_VARIANT_ROOTLESS:   return "越狱 rootless (ElleKit 加载器注入)";
         case DH_VARIANT_ROOTHIDE:   return "越狱 roothide (ElleKit 加载器注入, 胖切片)";
+        case DH_VARIANT_ROOTFUL:    return "越狱 rootful (Substitute / MobileSubstrate 加载器注入)";
         default:                    return "未知变体";
     }
 }

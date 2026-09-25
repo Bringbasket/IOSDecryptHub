@@ -9,8 +9,9 @@
 #   make                       编译引擎 (dev 变体, arm64)
 #   make VARIANT=trollstore    编译巨魔变体 (arm64) —— Release 里那个 dylib 资产
 #   make VARIANT=rootless      编译越狱变体 (arm64) —— deb 包里的引擎
+#   make VARIANT=rootful       编译传统 rootful 变体 (arm64) —— Substitute deb 包里的引擎
 #   make dist                  产出带版本号的 decrypt_helper-<version>.dylib
-#   make deb                   打 rootless + roothide 两个越狱 deb
+#   make deb                   打 rootless + roothide + rootful 三个越狱 deb
 #   make test-updater          仿真回归测试 (线上 release 走完整更新链路)
 #
 # 也可在 Linux/WSL 交叉编译: 需设置 IOS_SDK 指向 iPhoneOS SDK,
@@ -91,6 +92,7 @@ VERSION_DEF := -DDH_VERSION_STR=\"$(VERSION)\"
 #   make VARIANT=trollstore    -> trollstore (1) 巨魔注入器 —— Release 里的 dylib 资产
 #   make VARIANT=rootless      -> rootless   (2) 越狱 rootless 包
 #   make VARIANT=roothide      -> roothide   (3) 越狱 roothide 包 (胖切片 arm64+arm64e)
+#   make VARIANT=rootful       -> rootful    (4) 传统越狱包 (Substitute/MobileSubstrate)
 VARIANT ?= dev
 
 ifeq ($(VARIANT),dev)
@@ -109,8 +111,12 @@ else ifeq ($(VARIANT),roothide)
     DH_VARIANT_NUM := 3
     ARCH    := arm64
     MIN_IOS := 14.0
+else ifeq ($(VARIANT),rootful)
+    DH_VARIANT_NUM := 4
+    ARCH    := arm64
+    MIN_IOS := 14.0
 else
-    $(error 未知 VARIANT=$(VARIANT); 可选: dev / trollstore / rootless / roothide)
+    $(error 未知 VARIANT=$(VARIANT); 可选: dev / trollstore / rootless / roothide / rootful)
 endif
 
 # ---------- 1) iOS 真机 dylib (默认 target) ----------
@@ -229,12 +235,12 @@ dist: $(TARGET)
 	install_name_tool -id @executable_path/$(DIST_DYLIB) $(DIST_DYLIB)
 	@echo "✅ 发布产物: $(DIST_DYLIB) (VARIANT=$(VARIANT))"
 
-# ---------- 5) 越狱 deb 包 (rootless / roothide) ----------
+# ---------- 5) 越狱 deb 包 (rootless / roothide / rootful) ----------
 # 引擎在本仓编译 → 落进 vendor/dylib/<variant>/ → 交给 build_deb.sh 打包。
-# 每个 deb 包编自己的引擎变体, 架构也各按环境: rootless=arm64, roothide=arm64+arm64e。
+# 每个 deb 包编自己的引擎变体, 架构也各按环境: rootless/rootful=arm64, roothide=arm64+arm64e。
 # (1.27.5 及之前 roothide 包用的也是 rootless 变体引擎, 于是包内 version.plist 写
 #  roothide 而引擎自报 rootless, 两者矛盾; 现已修正为各自对应的变体。)
-.PHONY: stage-rootless stage-roothide
+.PHONY: stage-rootless stage-roothide stage-rootful
 
 stage-rootless:
 	@echo "[*] 编译引擎 (VARIANT=rootless, archs=arm64) → vendor/dylib/rootless"
@@ -248,6 +254,12 @@ stage-roothide:
 	mkdir -p vendor/dylib/roothide
 	cp $(TARGET) vendor/dylib/roothide/$(TARGET)
 
+stage-rootful:
+	@echo "[*] 编译引擎 (VARIANT=rootful, archs=arm64) → vendor/dylib/rootful"
+	$(MAKE) -B VARIANT=rootful ARCHS=arm64 all
+	mkdir -p vendor/dylib/rootful
+	cp $(TARGET) vendor/dylib/rootful/$(TARGET)
+
 deb-rootless: stage-rootless
 	@chmod +x build_deb.sh
 	./build_deb.sh rootless
@@ -256,9 +268,14 @@ deb-roothide: stage-roothide
 	@chmod +x build_deb.sh
 	./build_deb.sh roothide
 
+deb-rootful: stage-rootful
+	@chmod +x build_deb.sh
+	./build_deb.sh rootful
+
 deb:
 	$(MAKE) deb-rootless
 	$(MAKE) deb-roothide
+	$(MAKE) deb-rootful
 
 # 仿真回归测试：在 macOS 上把 daemon 跑成真机布局，用线上 release 走完整更新链路
 # 测试需要一个「旧引擎」作替身，所以先 stage 一份 roothide 引擎（该目录不入版本库）
@@ -269,7 +286,7 @@ test-updater: stage-roothide
 clean:
 	rm -f $(TARGET) $(MAC_TARGET) $(SIM_TARGET) decrypt_helper-*.dylib
 	rm -f $(WEB_HEADER) $(WECHAT_HEADER)
-	rm -f vendor/dylib/rootless/$(TARGET) vendor/dylib/roothide/$(TARGET)
+	rm -f vendor/dylib/rootless/$(TARGET) vendor/dylib/roothide/$(TARGET) vendor/dylib/rootful/$(TARGET)
 	rm -rf build/
 
-.PHONY: all linux mac sim dist clean deb deb-rootless deb-roothide test-updater
+.PHONY: all linux mac sim dist clean deb deb-rootless deb-roothide deb-rootful test-updater

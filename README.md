@@ -67,12 +67,13 @@ Sileo / Zebra 添加源：
 https://ios.decrypthub.com
 ```
 
-按环境安装（两种包对应不同设备架构，不能混装）：
+按环境安装（三种包对应不同越狱环境，不能混装）：
 
 - rootless（Dopamine、palera1n）：`com.iosdecrypthub` rootless 包
 - roothide：`com.iosdecrypthub` roothide 包
+- rootful（传统越狱、Substitute/MobileSubstrate）：`com.iosdecrypthub` rootful 包
 
-装好后桌面上会多一个 **IOSDecryptHub** 图标：在这里开关要注入的 App、检查更新、看历史版本。打开目标 App 前先完全退出，再启动即可注入。默认不注入任何 App。依赖 ellekit。
+装好后桌面上会多一个 **IOSDecryptHub** 图标：在这里开关要注入的 App、检查更新、看历史版本。打开目标 App 前先完全退出，再启动即可注入。默认不注入任何 App。rootless/roothide 依赖 ElleKit；rootful 依赖 Substitute/MobileSubstrate。
 
 <p align="center">
   <img src="./docs/screenshots/webui.png" alt="IOSDecryptHub Web 面板：加解密事件列表与输入明文 / HEX / HEXDUMP 详情" width="920">
@@ -100,6 +101,7 @@ idh mcp
 | `trollstore` | `make VARIANT=trollstore` | arm64 | 巨魔注入器 —— **Release 里的 dylib 资产** |
 | `rootless` | `make VARIANT=rootless` | arm64 | **rootless deb 包里的引擎** |
 | `roothide` | `make VARIANT=roothide` | arm64 + arm64e | **roothide deb 包里的引擎**（胖切片） |
+| `rootful` | `make VARIANT=rootful` | arm64 | **rootful deb 包里的引擎**（Substitute/MobileSubstrate） |
 
 ### 其他构建目标
 
@@ -113,12 +115,13 @@ make linux             # Linux/WSL 交叉编译（需设置 IOS_SDK 和 CROSS_CC
 ## 从源码打越狱 deb
 
 ```bash
-make deb              # 同时构建 rootless 与 roothide
+make deb              # 同时构建 rootless、roothide 与 rootful
 make deb-rootless     # 仅普通 rootless（arm64）
 make deb-roothide     # 仅 roothide（arm64 + arm64e）
+make deb-rootful      # 仅传统 rootful（arm64，依赖 com.ex.substitute）
 ```
 
-产物在 `build/deb/`。必须安装与设备环境匹配的包；roothide 环境装普通 rootless 包会因 `arm64` / `arm64e` 不兼容而无法加载。
+产物在 `build/deb/`。必须安装与设备环境匹配的包；rootful 设备不能安装依赖 ElleKit 的 rootless/roothide 包，roothide 环境装普通 rootless 包也会因 `arm64` / `arm64e` 不兼容而无法加载。
 
 `make deb` 会自动先编译引擎并落到 `vendor/dylib/<variant>/`，再调用 `build_deb.sh` 打包。前提：macOS + Xcode（`xcrun`）+ `dpkg-deb` + `ldid`。
 

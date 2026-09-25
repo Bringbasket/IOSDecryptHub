@@ -1,12 +1,13 @@
 #!/bin/bash
-# build_deb.sh — 打包 IOSDecryptHub rootless / roothide 越狱 deb
+# build_deb.sh — 打包 IOSDecryptHub rootless / roothide / rootful 越狱 deb
 #
 # dylib（引擎，由本仓 src/ 编译后落在 vendor/ 下，不入版本库）:
 #   vendor/dylib/rootless/decrypt_helper.dylib   VARIANT=rootless, arm64
 #   vendor/dylib/roothide/decrypt_helper.dylib   VARIANT=roothide, arm64 + arm64e
+#   vendor/dylib/rootful/decrypt_helper.dylib    VARIANT=rootful, arm64, Substitute
 #
 # 包内组件:
-#   IOSDecryptHubLoader.dylib  ElleKit 注入加载器（读名单 → dlopen 引擎，无 hook）
+#   IOSDecryptHubLoader.dylib  ElleKit/Substitute 注入加载器（读名单 → dlopen 引擎，无 hook）
 #   decrypt_helper.dylib       运行时分析引擎（本仓 src/ 编译产物）
 #   IOSDecryptHubManager.app   管理器 App（唯一入口：应用开关 / 更新 / 关于）
 #   IOSDecryptHubUpdated       updater daemon，一次性进程（检查/安装/回滚），见 AGENTS.md
@@ -17,6 +18,7 @@
 #   ./build_deb.sh              # 构建全部目标
 #   ./build_deb.sh rootless     # 仅普通 rootless
 #   ./build_deb.sh roothide     # 仅 roothide
+#   ./build_deb.sh rootful      # 仅传统 rootful / Substitute
 #
 # 前提: macOS + Xcode (xcrun) + dpkg-deb + ldid
 # 产物: build/deb/com.iosdecrypthub_<version>_<目标>.deb
@@ -24,15 +26,15 @@
 set -euo pipefail
 
 if [ "$#" -gt 1 ]; then
-    echo "[x] 用法: $0 [all|rootless|roothide]" >&2
+    echo "[x] 用法: $0 [all|rootless|roothide|rootful]" >&2
     exit 1
 fi
 
 TARGET="${1:-all}"
 case "$TARGET" in
-    all|rootless|roothide) ;;
+    all|rootless|roothide|rootful) ;;
     *)
-        echo "[x] 未知目标: $TARGET (可选: all / rootless / roothide)" >&2
+        echo "[x] 未知目标: $TARGET (可选: all / rootless / roothide / rootful)" >&2
         exit 1
         ;;
 esac
@@ -162,6 +164,11 @@ build_variant() {
     local APP_EXEC="$BUILD_DIR/_app-${VARIANT}/$APP_NAME"
     local DAEMON_OUT="$BUILD_DIR/_daemon-${VARIANT}/$DAEMON_BIN"
     local ENGINE_DYLIB
+    local PACKAGE_DEPENDS="ellekit"
+
+    if [ "$VARIANT" = "rootful" ]; then
+        PACKAGE_DEPENDS="com.ex.substitute"
+    fi
 
     ENGINE_DYLIB=$(require_vendor_dylib "$VARIANT" "$MACHO_ARCHS")
     compile_loader "$MACHO_ARCHS" "$LOADER_OUT"
@@ -190,7 +197,7 @@ Description: iOS 运行时安全分析工具 — 注入目标 App 后实时查�
 Maintainer: IOSDecryptHub
 Author: IOSDecryptHub
 Section: Tweaks
-Depends: ellekit
+Depends: ${PACKAGE_DEPENDS}
 Conflicts: com.iosdecrypthub.trollstore
 CTRL
 
@@ -414,7 +421,7 @@ POSTRM
 
     [ "$ACTUAL_ARCH" = "$ARCHITECTURE" ] || error "$VARIANT 架构错误: 期望 $ARCHITECTURE, 实际 $ACTUAL_ARCH"
 
-    [ "$ACTUAL_DEPENDS" = "ellekit" ] \
+    [ "$ACTUAL_DEPENDS" = "$PACKAGE_DEPENDS" ] \
         || error "$VARIANT 依赖集合错误: $ACTUAL_DEPENDS"
 
     if [ "$VARIANT" = "roothide" ]; then
@@ -519,6 +526,8 @@ case "$TARGET" in
             "iphoneos-arm64" "arm64" "arm64"
         build_variant "roothide" "" \
             "iphoneos-arm64e" "arm64 arm64e" "arm64 arm64e"
+        build_variant "rootful" "" \
+            "iphoneos-arm" "arm64" "arm64"
         ;;
     rootless)
         build_variant "rootless" "/var/jb" \
@@ -527,6 +536,10 @@ case "$TARGET" in
     roothide)
         build_variant "roothide" "" \
             "iphoneos-arm64e" "arm64 arm64e" "arm64 arm64e"
+        ;;
+    rootful)
+        build_variant "rootful" "" \
+            "iphoneos-arm" "arm64" "arm64"
         ;;
 esac
 

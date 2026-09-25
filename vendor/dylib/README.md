@@ -7,5 +7,9 @@
 |------|---------|------|
 | `rootless/decrypt_helper.dylib` | `VARIANT=rootless` | arm64 |
 | `roothide/decrypt_helper.dylib` | `VARIANT=roothide` | arm64 + arm64e |
+| `rootful/decrypt_helper.dylib` | `VARIANT=rootful` | arm64 |
 
-`build_deb.sh` 从这两个路径取引擎打进 deb。缺文件时先在仓库根目录执行 `make deb`。
+`build_deb.sh` 从对应路径取引擎打进 deb。缺文件时先在仓库根目录执行 `make deb`。
+
+`rootful` 面向传统 rootful 越狱，使用 Substitute/MobileSubstrate 加载器，包依赖为
+`com.ex.substitute`，不依赖 ElleKit；rootless/roothide 仍使用 ElleKit 和各自的文件系统前缀。

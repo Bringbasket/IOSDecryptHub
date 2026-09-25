@@ -12,6 +12,7 @@ on:
           - all
           - rootless
           - roothide
+          - rootful
   push:
     tags:
       - "v*"
@@ -50,6 +51,7 @@ jobs:
             all) make deb ;;
             rootless) make deb-rootless ;;
             roothide) make deb-roothide ;;
+            rootful) make deb-rootful ;;
             *) echo "Unsupported target: $DISPATCH_TARGET" >&2; exit 1 ;;
           esac
 

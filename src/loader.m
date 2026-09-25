@@ -1,6 +1,6 @@
 // loader.m — IOSDecryptHub 越狱注入加载器
 //
-// 由 rootless 环境的 ElleKit 加载到 UIKit App（Filter: com.apple.UIKit）。
+// 由 ElleKit 或 rootful Substitute 加载到 UIKit App（Filter: com.apple.UIKit）。
 // 唯一职责：读取偏好设置 → 判断当前 App 是否启用 → dlopen 主 dylib。
 // 不包含任何 hook 逻辑。hook 全部由主 dylib 的 constructor 完成。
 //
@@ -47,6 +47,8 @@ static NSArray<NSString *> *dh_paths_from_loader(NSString *relativeToJbroot) {
                 [relativeToJbroot substringFromIndex:8]]);
         }
     }
+    // rootful Substitute / MobileSubstrate: 主引擎直接位于 /usr/lib。
+    dh_add_unique(paths, [@"/" stringByAppendingString:relativeToJbroot]);
     dh_add_unique(paths, [@"/var/jb/" stringByAppendingString:relativeToJbroot]);
     return paths;
 }
