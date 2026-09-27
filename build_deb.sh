@@ -496,13 +496,15 @@ POSTRM
         "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.plist" \
         || error "$VARIANT 的 MobileLoader 过滤器未覆盖 UIKit App"
 
-    grep -q '<string>com.apple.WebKit.Networking</string>' \
-        "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.plist" \
-        || error "$VARIANT 的 MobileLoader 过滤器未覆盖 WebKit Networking"
+    if grep -q '<string>com.apple.WebKit.Networking</string>' \
+        "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.plist"; then
+        error "$VARIANT 的 MobileLoader 不得注入系统 WebKit Networking 进程"
+    fi
 
-    grep -q '<string>Any</string>' \
-        "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.plist" \
-        || error "$VARIANT 的 MobileLoader 过滤器缺少 Any 模式"
+    if grep -q '<key>Executables</key>' \
+        "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.plist"; then
+        error "$VARIANT 的 MobileLoader 不得指定系统进程可执行文件"
+    fi
 
     grep -q '<string>com.iosdecrypthub.updated</string>' \
         "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist" \
