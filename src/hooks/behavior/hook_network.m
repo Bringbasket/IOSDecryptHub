@@ -1303,10 +1303,3 @@ void dh_install_network_hooks(void) {
     install_socket_hooks();
     install_nw_hooks();
 }
-
-void dh_install_network_process_hooks(void) {
-    install_ssl_hooks();
-    install_securetransport_hooks();
-    install_socket_hooks();
-    install_nw_hooks();
-}

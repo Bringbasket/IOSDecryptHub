@@ -1,7 +1,6 @@
 // loader.m — IOSDecryptHub 越狱注入加载器
 //
-// 由 ElleKit 或 rootful Substitute 加载到 UIKit App，以及可选的
-// com.apple.WebKit.Networking（Filter 使用 Mode=Any）。
+// 由 ElleKit 或 rootful Substitute 加载到 UIKit App。
 // 唯一职责：读取偏好设置 → 判断当前 App 是否启用 → dlopen 主 dylib。
 // 不包含任何 hook 逻辑。hook 全部由主 dylib 的 constructor 完成。
 //
@@ -120,20 +119,14 @@ static BOOL dh_is_webkit_networking(NSString *bundleID, NSString *processName) {
            [bundleID isEqualToString:@"com.apple.WebKit.Networking"];
 }
 
-// 读取偏好：普通 App 按启用名单；WebKit Networking 由独立全局开关控制。
+// WebKit Networking 是系统网络进程。旧版曾允许全局注入；即便旧 Filter 仍在设备上，
+// 这里也必须拒绝，避免影响其它 App 和系统网页的联网。
 static BOOL dh_should_inject(NSString *bundleID, NSString *processName) {
+    if (dh_is_webkit_networking(bundleID, processName)) return NO;
     const char *source = "none";
     NSDictionary *domain = dh_read_loader_domain(&source);
     if (![domain isKindOfClass:[NSDictionary class]]) return NO;
     if (!dh_feature_enabled(domain, DH_FEATURE_MASTER, YES)) return NO;
-
-    if (dh_is_webkit_networking(bundleID, processName)) {
-        BOOL enabled = dh_feature_enabled(domain, DH_FEATURE_WEBKIT_PROCESS, NO);
-        if (enabled) {
-            syslog(LOG_NOTICE, LOADER_TAG " 将主引擎注入 WebKit Networking source=%s", source);
-        }
-        return enabled;
-    }
 
     if (bundleID.length == 0 || [bundleID hasPrefix:@"com.apple."]) return NO;
     id raw = domain[DH_KEY_BUNDLES];

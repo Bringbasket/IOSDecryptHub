@@ -1,10 +1,11 @@
-# WebKit 完整网络采集
+# WebKit 网络采集
 
-IOSDecryptHub 采用三层互补采集，并把结果汇总到目标 App 原有的 Web 面板：
+IOSDecryptHub 把以下两类 WebKit 事件汇总到目标 App 的 Web 面板：
 
 1. **WKWebView JS 探针**：在 document-start 观测 fetch、XHR、WebSocket、EventSource、sendBeacon，请求体支持 FormData、Blob、ArrayBuffer 等类型。面板来源显示为 `JS`。
-2. **WebKit Networking 进程 Hook**：补充 TLS、连接、SNI、SecureTransport 与 Network.framework 事件。该进程不再单独监听 HTTP 端口，而是通过设备回环汇总到目标 App，来源显示为 `NETWORKING`。
-3. **Remote Inspector/CDP**：获取完整 URL、请求头、响应头、资源类型，并主动读取请求 postData 与响应 body，来源显示为 `WIR`。
+2. **Remote Inspector/CDP**：获取 URL、请求头、响应头、资源类型，并尝试读取请求 postData 与响应 body，来源显示为 `WIR`。
+
+旧版曾向 `com.apple.WebKit.Networking` 注入低层网络 Hook。它是系统进程，可能处理多个 App 的 WebView；高频 Hook 和日志处理会拖慢或阻塞全机网页流量。该路径已停用，旧配置里的 `webkitProcess` 也不会重新启用它。JS 探针和 WIR 能覆盖各自可见的请求，但不能保证拿到所有底层 TLS/连接细节。
 
 ## 手机端开关
 
@@ -12,9 +13,8 @@ IOSDecryptHub 采用三层互补采集，并把结果汇总到目标 App 原有�
 
 - 网络抓包
 - WebKit JS 探针
-- WebKit 网络进程
 
-随后完全结束目标 App 和已有 WebKit Networking 进程，再重新打开目标 App。JS 探针对新建或重新加载的 WKWebView 生效。
+随后完全退出并重新打开目标 App。JS 探针对新建或重新加载的 WKWebView 生效。
 
 ## 电脑端 WIR 桥
 
@@ -51,8 +51,8 @@ python tools/idh_wir_bridge.py --collector http://192.168.1.159:8088 --target '�
 - `GET /api/collector/info`：当前 App collector 身份。
 - `GET /api/collector/status`：收到、转发、丢弃和失败计数。
 - `GET /api/stats` 的 `collector` 字段：同一状态的面板轮询版本。
-- Web 面板网络列表中的 `[JS]`、`[WIR]`、`[NETWORKING]` 标签：确认事件具体来自哪一层。
+- Web 面板网络列表中的 `[JS]`、`[WIR]` 标签：确认事件具体来自哪一层。
 
-Networking 生产者会优先用 App 容器 token 匹配 collector；若无法匹配且设备上同时有多个 IOSDecryptHub 面板，它不会猜测目标，避免把一个 App 的流量汇总到另一个 App。此时只保留一个目标 App 运行后重试即可。
+旧日志仍可能显示 `[NETWORKING]`，更新后的版本不会再产生新的系统 Networking 事件。
 
 > Web/MCP/collector 仍无认证，只应在可信局域网使用。仅分析你拥有或明确获授权的 App 与流量。

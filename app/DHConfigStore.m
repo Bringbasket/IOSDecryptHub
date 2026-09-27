@@ -93,6 +93,8 @@ static NSDictionary<NSString *, NSNumber *> *dh_merge_feature_flags(id raw) {
             if ([value isKindOfClass:[NSNumber class]]) merged[key] = @([value boolValue]);
         }
     }
+    // 旧配置可能还留着系统进程开关；该注入路径已停用，读取时统一显示为关闭。
+    merged[DH_FEATURE_WEBKIT_PROCESS] = @NO;
     return merged;
 }
 
@@ -178,6 +180,11 @@ NSDictionary<NSString *, NSNumber *> *DHReadFeatureFlags(void) {
 }
 
 BOOL DHWriteFeatureFlag(NSString *key, BOOL enabled, NSError **outError) {
+    if ([key isEqualToString:DH_FEATURE_WEBKIT_PROCESS] && enabled) {
+        if (outError) *outError = [NSError errorWithDomain:@"DHManager" code:-22 userInfo:
+            @{NSLocalizedDescriptionKey: @"WebKit 系统网络进程注入已停用"}];
+        return NO;
+    }
     if (![dh_feature_defaults().allKeys containsObject:key]) {
         if (outError) *outError = [NSError errorWithDomain:@"DHManager" code:-20 userInfo:
             @{NSLocalizedDescriptionKey: @"未知功能开关"}];

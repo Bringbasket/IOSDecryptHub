@@ -18,17 +18,15 @@ static NSArray<NSDictionary *> *dh_feature_sections(void) {
         sections = @[
             @{
                 @"title": @"核心",
-                @"footer": @"WebKit 网络进程使用同一主引擎的轻量模式，只安装低层网络 Hook，不启动悬浮窗、Dump 或完整分析模块。此开关会影响所有 WebView，默认关闭。",
+                @"footer": @"系统 WebKit 网络进程可能服务多个 App，已停用向该进程注入。目标 App 的 WebView 可使用下方 JS 探针采集请求。",
                 @"rows": @[
                     @{ @"key": DH_FEATURE_MASTER, @"title": @"总开关",
                        @"detail": @"控制所有运行时捕获功能" },
-                    @{ @"key": DH_FEATURE_WEBKIT_PROCESS, @"title": @"WebKit 网络进程",
-                       @"detail": @"注入 com.apple.WebKit.Networking，捕获跨进程流量" },
                 ],
             },
             @{
                 @"title": @"网络",
-                @"footer": @"WebKit 网络进程开关需要同时开启“网络抓包”。修改后请完全退出并重新打开目标 App；若仍未生效，请结束现有 WebKit 网络进程或注销桌面。已加载的进程不会热卸载引擎。",
+                @"footer": @"修改后请完全退出并重新打开目标 App；JS 探针对新建或重新加载的 WKWebView 生效。更完整的 WebKit 请求信息可连接电脑端 WIR 桥。",
                 @"rows": @[
                     @{ @"key": DH_FEATURE_NETWORK, @"title": @"网络抓包",
                        @"detail": @"记录 NSURLSession、TLS、Socket 与 Network.framework 调用" },

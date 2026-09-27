@@ -26,8 +26,8 @@
 #define DH_KEY_BUNDLES    @"enabledBundles"
 #define DH_KEY_FEATURES   @"featureFlags"
 
-// 管理器 App 的全局功能开关。缺失时按兼容默认值处理：除高风险的 WebKit
-// 系统进程注入和 JS 探针外，其余捕获能力保持开启，与旧版本行为一致。
+// 管理器 App 的全局功能开关。webkitProcess 仅保留为旧配置兼容字段，
+// 系统进程注入已经停用；JS 探针默认关闭，其余捕获能力沿用旧版默认值。
 #define DH_FEATURE_MASTER          @"master"
 #define DH_FEATURE_WEBKIT_PROCESS  @"webkitProcess"
 #define DH_FEATURE_NETWORK         @"network"

@@ -76,6 +76,8 @@ https://ios.decrypthub.com
 
 装好后桌面上会多一个 **IOSDecryptHub** 图标：在这里开关要注入的 App、检查更新、看历史版本。打开目标 App 前先完全退出，再启动即可注入。默认不注入任何 App。rootless/roothide 依赖 ElleKit；rootful 依赖 Substitute/MobileSubstrate。
 
+WebKit 请求可通过目标 App 内的 JS 探针和电脑端 WIR 桥采集。系统 `com.apple.WebKit.Networking` 进程注入已停用；它可能承载多个 App 的网页流量，不适合作为单个目标 App 的注入范围。详见 [WebKit 网络采集](docs/webkit_full_capture.md)。
+
 <p align="center">
   <img src="./docs/screenshots/webui.png" alt="IOSDecryptHub Web 面板：加解密事件列表与输入明文 / HEX / HEXDUMP 详情" width="920">
 </p>
